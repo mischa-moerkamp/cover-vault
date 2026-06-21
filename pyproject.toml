@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cover-vault"
+version = "1.0.0"
+description = "Password-protected folder vaults hidden inside cover files."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography>=42.0.0",
+  "Pillow>=10.0.0"
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=7.0.0"
+]
+dev = [
+  "pytest>=7.0.0",
+  "black>=24.0.0",
+  "ruff>=0.5.0"
+]
+
+[project.scripts]
+cover-vault = "cover_vault.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

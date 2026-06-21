@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+.DS_Store
+*.vault
+*.stego.wav
+*.stego.mp3
