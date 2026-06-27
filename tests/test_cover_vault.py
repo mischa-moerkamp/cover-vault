@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import math
 import wave
 from pathlib import Path
@@ -7,6 +8,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from cover_vault.archive import DEFAULT_EXCLUDES, GIT_HISTORY_EXCLUDE
+from cover_vault.cli import _excludes_from_args
 from cover_vault.errors import CoverVaultError
 from cover_vault.vault import cover_info, hide_folder, plan_folder, reveal_folder
 
@@ -63,6 +66,27 @@ def assert_restored(restored: Path) -> None:
     assert not (restored / ".git").exists()
 
 
+def assert_git_history_restored(restored: Path) -> None:
+    assert (restored / ".git" / "HEAD").read_text(encoding="utf-8") == (
+        "ref: refs/heads/main\n"
+    )
+    assert (
+        restored / ".git" / "objects" / "aa" / "fake-history-object"
+    ).read_bytes() == b"commit history bytes"
+
+
+def test_include_git_history_option_keeps_other_default_excludes() -> None:
+    args = argparse.Namespace(
+        no_default_excludes=False, include_git_history=True, exclude=[]
+    )
+
+    excludes = _excludes_from_args(args)
+
+    assert GIT_HISTORY_EXCLUDE not in excludes
+    for default_exclude in DEFAULT_EXCLUDES - {GIT_HISTORY_EXCLUDE}:
+        assert default_exclude in excludes
+
+
 def test_wav_lsb_roundtrip_excludes_git_history_by_default(tmp_path: Path) -> None:
     source = tmp_path / "source"
     cover = tmp_path / "cover.wav"
@@ -97,6 +121,29 @@ def test_image_lsb_roundtrip(tmp_path: Path) -> None:
     result = reveal_folder(stego, cover, restored, "password", mode="image-lsb")
     assert result["files_decrypted"] == 2
     assert_restored(restored)
+
+
+def test_image_lsb_roundtrip_can_include_git_history(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    cover = tmp_path / "cover.png"
+    stego = tmp_path / "cover.stego.png"
+    restored = tmp_path / "restored"
+    make_source_folder(source)
+    make_png(cover)
+    excludes = tuple(
+        name for name in DEFAULT_EXCLUDES if name != GIT_HISTORY_EXCLUDE
+    )
+
+    result = hide_folder(
+        source, cover, stego, "password", mode="image-lsb", excludes=excludes
+    )
+    assert result["files_encrypted"] == 4
+
+    result = reveal_folder(stego, cover, restored, "password", mode="image-lsb")
+    assert result["files_decrypted"] == 4
+    assert (restored / "main.py").exists()
+    assert (restored / "pkg" / "module.py").exists()
+    assert_git_history_restored(restored)
 
 
 def test_auto_mode_detects_image(tmp_path: Path) -> None:

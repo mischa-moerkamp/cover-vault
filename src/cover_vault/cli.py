@@ -3,13 +3,20 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from .archive import DEFAULT_EXCLUDES
+from .archive import DEFAULT_EXCLUDES, GIT_HISTORY_EXCLUDE
 from .errors import CoverVaultError
 from .stego import DEFAULT_MAX_USAGE_RATIO
 from .vault import cover_info, hide_folder, plan_folder, reveal_folder
+
+
+def _package_version() -> str:
+    try:
+        return version("cover-vault")
+    except PackageNotFoundError:  # pragma: no cover - source-tree convenience
+        return "0+unknown"
 
 
 def _password_from_args(args: argparse.Namespace, *, confirm: bool = False) -> str:
@@ -25,8 +32,15 @@ def _password_from_args(args: argparse.Namespace, *, confirm: bool = False) -> s
 
 
 def _excludes_from_args(args: argparse.Namespace) -> tuple[str, ...]:
-    default_excludes = () if args.no_default_excludes else tuple(DEFAULT_EXCLUDES)
-    return tuple(default_excludes) + tuple(args.exclude)
+    if args.no_default_excludes:
+        default_excludes: tuple[str, ...] = ()
+    elif args.include_git_history:
+        default_excludes = tuple(
+            sorted(name for name in DEFAULT_EXCLUDES if name != GIT_HISTORY_EXCLUDE)
+        )
+    else:
+        default_excludes = tuple(sorted(DEFAULT_EXCLUDES))
+    return default_excludes + tuple(args.exclude)
 
 
 def _add_exclude_args(parser: argparse.ArgumentParser) -> None:
@@ -35,6 +49,14 @@ def _add_exclude_args(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="Folder or file name to exclude. Can be repeated, e.g. --exclude node_modules --exclude dist.",
+    )
+    parser.add_argument(
+        "--include-git-history",
+        action="store_true",
+        help=(
+            "Include the .git directory so the encrypted archive contains Git commit history. "
+            "Other default excludes still apply."
+        ),
     )
     parser.add_argument(
         "--no-default-excludes",
@@ -70,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Encrypt folders and hide them inside lossless audio or image cover files.",
     )
     parser.add_argument(
-        "--version", action="version", version=f"cover-vault {version('cover-vault')}"
+        "--version", action="version", version=f"cover-vault {_package_version()}"
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)

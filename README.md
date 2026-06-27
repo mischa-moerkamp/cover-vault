@@ -27,6 +27,15 @@ Cover Vault archives the current files in the target folder. It excludes Git com
 
 That means a Git repository is treated as its current working tree snapshot, not as its full version-control database. Untracked files are included unless they match an exclude rule.
 
+To include Git commit history, include the `.git` directory explicitly:
+
+```bash
+cover-vault hide ./my-codebase ./cover.png ./cover.stego.png --include-git-history
+cover-vault plan ./my-codebase ./cover.png --include-git-history
+```
+
+`--include-git-history` keeps the other default excludes in place. This is usually preferable to `--no-default-excludes`, because Git history can be included without also archiving `__pycache__`, `.DS_Store`, `.hg`, or `.svn`.
+
 You can add more excludes:
 
 ```bash
@@ -36,7 +45,7 @@ cover-vault hide ./my-codebase ./cover.png ./cover.stego.png \
   --exclude .venv
 ```
 
-You can disable the default excludes with `--no-default-excludes`.
+You can disable all default excludes with `--no-default-excludes`. This also includes `.git`, but it removes every other default exclude too.
 
 ## Supported carrier modes
 
@@ -82,6 +91,7 @@ Use `plan` before hiding:
 
 ```bash
 cover-vault plan ./my-codebase ./cover.png
+cover-vault plan ./my-codebase ./cover.png --include-git-history
 ```
 
 Example output:

@@ -11,6 +11,7 @@ from .errors import CoverVaultError
 # Defaults intentionally exclude VCS internals. This captures the current
 # filesystem state of the target folder, not its Git/SVN/Mercurial history.
 DEFAULT_EXCLUDES = {".DS_Store", "__pycache__", ".git", ".hg", ".svn"}
+GIT_HISTORY_EXCLUDE = ".git"
 
 
 def _is_relative_to(child: Path, parent: Path) -> bool:
