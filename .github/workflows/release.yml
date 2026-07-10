@@ -1,0 +1,73 @@
+name: Build desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e '.[test]'
+      - run: pytest
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        shell: pwsh
+        env:
+          COVER_VAULT_VERSION: ${{ github.ref_name }}
+        run: |
+          $env:COVER_VAULT_VERSION = $env:COVER_VAULT_VERSION.TrimStart('v')
+          ./packaging/windows/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/installer/*.exe
+
+  macos:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Build DMG
+        env:
+          COVER_VAULT_VERSION: ${{ github.ref_name }}
+        run: |
+          export COVER_VAULT_VERSION="${COVER_VAULT_VERSION#v}"
+          ./packaging/macos/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+
+  linux:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Build DEB
+        env:
+          COVER_VAULT_VERSION: ${{ github.ref_name }}
+        run: |
+          export COVER_VAULT_VERSION="${COVER_VAULT_VERSION#v}"
+          ./packaging/linux/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: dist/*.deb

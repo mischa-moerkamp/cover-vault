@@ -12,6 +12,7 @@ from .crypto import (
     encrypted_payload_size_for_plaintext,
 )
 from .errors import CoverVaultError
+from .progress import ProgressCallback, report
 from .stego import (
     DEFAULT_MAX_USAGE_RATIO,
     embed_payload_image,
@@ -92,14 +93,19 @@ def hide_folder(
     mode: CarrierMode = "auto",
     excludes: Iterable[str] = DEFAULT_EXCLUDES,
     max_usage_ratio: float = DEFAULT_MAX_USAGE_RATIO,
+    progress: ProgressCallback | None = None,
 ) -> dict:
     """Encrypt a folder and hide the encrypted payload in a cover file."""
 
+    report(progress, 0.02, "Reading cover file")
     cover_bytes = read_cover(cover_source)
     detected_mode = _detect_hide_mode(cover_bytes, mode)
+    report(progress, 0.12, f"Creating archive ({detected_mode})")
     archive_bytes, files_added = make_archive(source_folder, excludes=excludes)
+    report(progress, 0.42, "Encrypting archive")
     payload = encrypt_payload(archive_bytes, password=password, cover_bytes=cover_bytes)
     seed = position_seed(detected_mode, cover_bytes, password)
+    report(progress, 0.66, "Embedding encrypted payload")
 
     if detected_mode == "wav-lsb":
         usage = embed_payload_wav(
@@ -124,6 +130,7 @@ def hide_folder(
     else:  # pragma: no cover - guarded by mode detection
         raise CoverVaultError(f"Unsupported carrier mode: {detected_mode}")
 
+    report(progress, 1.0, "Vault created")
     return {
         "mode": detected_mode,
         "output": str(Path(output_file).expanduser()),
@@ -174,17 +181,23 @@ def reveal_folder(
     password: str,
     mode: RevealMode = "auto",
     overwrite: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> dict:
     """Extract, decrypt, and restore a hidden folder payload."""
 
+    report(progress, 0.02, "Reading original cover")
     cover_bytes = read_cover(cover_source)
+    report(progress, 0.18, "Extracting encrypted payload")
     payload, detected_mode = _extract_payload(
         stego_file, mode, cover_bytes=cover_bytes, password=password
     )
+    report(progress, 0.50, "Decrypting archive")
     archive_bytes = decrypt_payload(payload, password=password, cover_bytes=cover_bytes)
+    report(progress, 0.76, "Restoring files")
     files_written = extract_archive(
         archive_bytes, destination_folder, overwrite=overwrite
     )
+    report(progress, 1.0, "Folder restored")
     return {
         "mode": detected_mode,
         "destination": str(Path(destination_folder).expanduser()),

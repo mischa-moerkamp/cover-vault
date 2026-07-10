@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+build = [
+  "pyinstaller>=6.8.0"
+]
 test = [
   "pytest>=7.0.0"
 ]
@@ -25,6 +28,7 @@ dev = [
 
 [project.scripts]
 cover-vault = "cover_vault.cli:main"
+cover-vault-gui = "cover_vault.gui:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
