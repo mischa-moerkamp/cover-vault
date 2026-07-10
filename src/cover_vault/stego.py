@@ -12,6 +12,8 @@ from .errors import CoverVaultError
 
 WAV_STEGO_MAGIC = b"CVWAV2\x00"
 IMAGE_STEGO_MAGIC = b"CVIMG1\x00"
+PDF_STEGO_MAGIC = b"CVPDF1\x00"
+PDF_STEGO_FOOTER = b"CVPDFEND1\x00"
 LOSSLESS_IMAGE_OUTPUT_FORMATS = {
     ".png": "PNG",
     ".bmp": "BMP",
@@ -332,3 +334,68 @@ def extract_payload_image(stego_file: Path | str, seed: bytes) -> bytes:
         header_bits_needed:
     ]
     return _bits_to_bytes(payload_bits)
+
+
+def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
+    if not pdf_bytes.lstrip().startswith(b"%PDF-"):
+        raise CoverVaultError("PDF mode requires a valid-looking PDF cover file.")
+    if b"%%EOF" not in pdf_bytes[-4096:]:
+        raise CoverVaultError("PDF cover does not contain a final %%EOF marker.")
+
+
+def pdf_usage_capacity_bytes_from_bytes(pdf_bytes: bytes) -> int:
+    """Return the reference capacity used for PDF cover-ratio guidance.
+
+    PDF append mode is not physically bounded like LSB carriers, so the original
+    PDF byte length is used as the denominator for the configurable usage guard.
+    """
+    _validate_pdf_bytes(pdf_bytes)
+    return len(pdf_bytes)
+
+
+def embed_payload_pdf(
+    cover_bytes: bytes,
+    output_pdf: Path | str,
+    payload: bytes,
+    *,
+    max_usage_ratio: float = DEFAULT_MAX_USAGE_RATIO,
+) -> dict:
+    _validate_pdf_bytes(cover_bytes)
+    output_path = Path(output_pdf).expanduser()
+    if output_path.suffix.lower() != ".pdf":
+        raise CoverVaultError("PDF mode must write an output file ending in .pdf.")
+
+    capacity = pdf_usage_capacity_bytes_from_bytes(cover_bytes)
+    validate_capacity(
+        mode="pdf-append",
+        payload_bytes=len(payload),
+        capacity_bytes=capacity,
+        max_usage_ratio=max_usage_ratio,
+    )
+    container = _container(PDF_STEGO_MAGIC, payload)
+    footer = PDF_STEGO_FOOTER + struct.pack(">Q", len(container))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(cover_bytes + b"\n" + container + footer)
+    return describe_usage(len(payload), capacity)
+
+
+def extract_payload_pdf(stego_file: Path | str) -> bytes:
+    data = Path(stego_file).expanduser().read_bytes()
+    footer_len = len(PDF_STEGO_FOOTER) + 8
+    if len(data) < footer_len or data[-footer_len:-8] != PDF_STEGO_FOOTER:
+        raise CoverVaultError("No Cover Vault PDF payload marker found.")
+    container_len = struct.unpack(">Q", data[-8:])[0]
+    start = len(data) - footer_len - container_len
+    if start < 0:
+        raise CoverVaultError("Stego PDF payload appears truncated.")
+    container = data[start : len(data) - footer_len]
+    header_len = len(PDF_STEGO_MAGIC) + 8
+    if len(container) < header_len or not container.startswith(PDF_STEGO_MAGIC):
+        raise CoverVaultError("No Cover Vault PDF payload marker found.")
+    payload_len = struct.unpack(
+        ">Q", container[len(PDF_STEGO_MAGIC) : header_len]
+    )[0]
+    payload = container[header_len:]
+    if len(payload) != payload_len:
+        raise CoverVaultError("Stego PDF payload appears truncated.")
+    return payload

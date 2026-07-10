@@ -68,9 +68,9 @@ def _add_exclude_args(parser: argparse.ArgumentParser) -> None:
 def _add_mode_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--mode",
-        choices=("auto", "wav-lsb", "image-lsb"),
+        choices=("auto", "wav-lsb", "image-lsb", "pdf-append"),
         default="auto",
-        help="Carrier mode. auto selects PCM WAV or lossless image LSB from the cover type.",
+        help="Carrier mode. auto selects PCM WAV, lossless image LSB, or PDF append mode from the cover type.",
     )
 
 
@@ -89,7 +89,7 @@ def _add_usage_arg(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cover-vault",
-        description="Encrypt folders and hide them inside lossless audio or image cover files.",
+        description="Encrypt folders and hide them inside lossless audio, image, or PDF cover files.",
     )
     parser.add_argument(
         "--version", action="version", version=f"cover-vault {_package_version()}"
@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     hide.add_argument(
         "output",
         type=Path,
-        help="Output stego file. Use .wav for WAV mode or .png/.bmp/.tiff for image mode.",
+        help="Output stego file. Use .wav for WAV mode, .png/.bmp/.tiff for image mode, or .pdf for PDF mode.",
     )
     _add_mode_arg(hide)
     _add_usage_arg(hide)
@@ -128,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     reveal.add_argument("destination", type=Path, help="Folder to restore into.")
     reveal.add_argument(
         "--mode",
-        choices=("auto", "wav-lsb", "image-lsb"),
+        choices=("auto", "wav-lsb", "image-lsb", "pdf-append"),
         default="auto",
         help="Payload extraction mode.",
     )

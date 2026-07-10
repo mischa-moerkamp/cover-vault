@@ -58,6 +58,21 @@ def make_png(path: Path, size: tuple[int, int] = (180, 180)) -> None:
     image.save(path, format="PNG")
 
 
+
+def make_pdf(path: Path, filler_bytes: int = 20_000) -> None:
+    # Minimal one-page PDF followed by a large comment block. PDF readers ignore
+    # comments, making this a deterministic, dependency-free test cover.
+    body = (
+        b"%PDF-1.4\n"
+        b"1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\n"
+        b"2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj\n"
+        b"3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>endobj\n"
+        + b"%" + (b" cover-vault-test" * (filler_bytes // 17 + 1))[:filler_bytes] + b"\n"
+        b"xref\n0 4\n0000000000 65535 f \n"
+        b"trailer<< /Root 1 0 R /Size 4 >>\nstartxref\n0\n%%EOF\n"
+    )
+    path.write_bytes(body)
+
 def assert_restored(restored: Path) -> None:
     assert (restored / "main.py").read_text(encoding="utf-8") == "print('hello')\n"
     assert (restored / "pkg" / "module.py").read_text(
@@ -203,4 +218,37 @@ def test_info_and_plan_report_capacity(tmp_path: Path) -> None:
     plan = plan_folder(source, cover, mode="image-lsb")
     assert plan["files_to_encrypt"] == 2
     assert plan["fits_capacity"] is True
+    assert plan["fits_ratio_limit"] is True
+
+
+def test_pdf_append_roundtrip_and_auto_detection(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    cover = tmp_path / "cover.pdf"
+    stego = tmp_path / "cover.stego.pdf"
+    restored = tmp_path / "restored"
+    make_source_folder(source)
+    make_pdf(cover)
+
+    result = hide_folder(source, cover, stego, "password")
+    assert result["mode"] == "pdf-append"
+    assert stego.read_bytes().startswith(cover.read_bytes())
+    assert result["usage_ratio"] < 0.25
+
+    revealed = reveal_folder(stego, cover, restored, "password")
+    assert revealed["mode"] == "pdf-append"
+    assert_restored(restored)
+
+
+def test_pdf_info_and_plan(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    cover = tmp_path / "cover.pdf"
+    make_source_folder(source)
+    make_pdf(cover)
+
+    info = cover_info(cover)
+    assert info["supported_modes"] == ["pdf-append"]
+    assert info["capacities"]["pdf-append"] == cover.stat().st_size
+
+    plan = plan_folder(source, cover)
+    assert plan["mode"] == "pdf-append"
     assert plan["fits_ratio_limit"] is True

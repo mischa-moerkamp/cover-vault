@@ -1,23 +1,23 @@
 # Cover Vault
 
-Cover Vault encrypts the current filesystem state of a folder and hides the encrypted archive inside a lossless audio or image cover file.
-
-The intended workflow is:
+Cover Vault encrypts the current filesystem state of a folder and stores the encrypted archive inside a cover file that remains usable as an ordinary WAV, lossless image, or PDF document.
 
 ```text
-codebase/                   # folder to protect; .git history excluded by default
-cover.wav or cover.png      # public, non-secret cover file
-cover.stego.wav/png         # file that carries the encrypted folder payload
-restored-codebase/          # recovered folder after reveal
+codebase/                    # folder to protect; Git history excluded by default
+cover.wav/png/pdf            # public, non-secret original cover
+cover.stego.wav/png/pdf      # cover carrying the encrypted folder payload
+restored-codebase/           # recovered folder after reveal
 ```
 
-To reveal the folder, you need:
+To reveal a folder, you need:
 
 1. the stego file,
 2. the password, and
-3. the exact original cover file bytes, either from a local copy or from the original download URL.
+3. the exact original cover-file bytes, from a local file or the original download URL.
 
-Cover Vault archives the current files in the target folder. It excludes Git commit history by default. Default excludes:
+## What gets archived
+
+Cover Vault archives the current files in the target folder. It excludes these names by default:
 
 - `.git`
 - `.hg`
@@ -25,18 +25,18 @@ Cover Vault archives the current files in the target folder. It excludes Git com
 - `__pycache__`
 - `.DS_Store`
 
-That means a Git repository is treated as its current working tree snapshot, not as its full version-control database. Untracked files are included unless they match an exclude rule.
+A Git repository is therefore treated as a snapshot of its current working tree rather than its complete version-control database. Untracked files are included unless an exclusion rule matches them.
 
-To include Git commit history, include the `.git` directory explicitly:
+Include Git commit history explicitly:
 
 ```bash
 cover-vault hide ./my-codebase ./cover.png ./cover.stego.png --include-git-history
 cover-vault plan ./my-codebase ./cover.png --include-git-history
 ```
 
-`--include-git-history` keeps the other default excludes in place. This is usually preferable to `--no-default-excludes`, because Git history can be included without also archiving `__pycache__`, `.DS_Store`, `.hg`, or `.svn`.
+`--include-git-history` includes `.git` while retaining the other default exclusions. This is usually safer than `--no-default-excludes`, which disables every default exclusion.
 
-You can add more excludes:
+Add custom exclusions by name:
 
 ```bash
 cover-vault hide ./my-codebase ./cover.png ./cover.stego.png \
@@ -45,91 +45,95 @@ cover-vault hide ./my-codebase ./cover.png ./cover.stego.png \
   --exclude .venv
 ```
 
-You can disable all default excludes with `--no-default-excludes`. This also includes `.git`, but it removes every other default exclude too.
-
 ## Supported carrier modes
-
-Cover Vault intentionally focuses on reversible, lossless carriers.
 
 ### `wav-lsb`
 
-Hides encrypted bits in the least significant bit of PCM WAV samples.
+Stores encrypted bits in the least significant bit of PCM WAV samples.
 
-Good covers:
+Recommended covers:
 
 - uncompressed PCM WAV,
-- longer audio files,
-- naturally textured/noisy recordings rather than very quiet/sparse audio.
+- longer recordings,
+- naturally textured or noisy audio rather than silence or sparse tones.
+
+The output must be a WAV file.
 
 ### `image-lsb`
 
-Hides encrypted bits in the least significant bit of RGB image channels.
+Stores encrypted bits in the least significant bit of RGB image channels.
 
-Good covers:
+Recommended covers:
 
-- PNG,
-- BMP,
-- TIFF,
-- larger images,
-- photographs or textured artwork rather than flat diagrams or solid-color images.
+- PNG, BMP, or TIFF output,
+- large photographs or textured artwork,
+- images without large flat or solid-color regions.
+
+JPEG and lossy WebP output are not supported because lossy encoding can destroy the hidden bits.
+
+### `pdf-append`
+
+Appends a structured encrypted payload after the PDF's final `%%EOF` marker. Most PDF readers tolerate trailing data, so the resulting file remains usable as a PDF.
+
+Important differences from the LSB modes:
+
+- PDF mode does not alter page pixels, text, or objects.
+- It is broadly compatible and fully reversible.
+- It is less covert than LSB embedding because appended data can be found by inspecting the file structure or size.
+- PDF optimization, sanitization, rewriting, linearization, or “Save As” operations may remove the appended payload.
+
+Use an ordinary, sufficiently large PDF and keep the exact original PDF unchanged for recovery.
 
 ## Capacity and cover selection
-
-Cover choice matters. Cover Vault estimates how much payload can fit in a cover and refuses to hide data when the payload would occupy too much of the available carrier capacity.
-
-The default limit is:
-
-```text
-max usage ratio = 25% of available carrier capacity
-```
-
-It also prints a warning above 10% usage. Lower is better.
-
-A larger cover with a smaller payload causes fewer changed LSB positions as a fraction of the total carrier, while a small cover with a large payload changes more of the cover and is more likely to create visible, audible, or statistical artifacts.
 
 Use `plan` before hiding:
 
 ```bash
 cover-vault plan ./my-codebase ./cover.png
-cover-vault plan ./my-codebase ./cover.png --include-git-history
+cover-vault plan ./my-codebase ./cover.wav --mode wav-lsb
+cover-vault plan ./my-codebase ./cover.pdf --mode pdf-append
 ```
 
-Example output:
+For WAV and image modes, capacity is based on the number of available LSB positions. For PDF mode, the original PDF file size is used as the reference denominator because appended data is not constrained by a fixed physical bit capacity.
+
+The default maximum usage ratio is 25%:
 
 ```text
-Selected mode: image-lsb
-Files to encrypt: 12
-Compressed archive estimate: 18420 bytes
-Encrypted payload estimate: 18742 bytes
-Payload capacity: 245744 bytes
-Cover usage: 7.63%
-Fits raw capacity: yes
-Fits ratio limit (25.00%): yes
+max usage ratio = encrypted payload bytes / reference capacity bytes
 ```
 
-If the plan does not fit, use a larger cover, reduce the source folder, add excludes, or explicitly raise the limit:
+Cover Vault warns above 10% and refuses the operation above 25%. Lower ratios generally make file-size changes and carrier modifications less conspicuous.
+
+Raise the limit explicitly when required:
 
 ```bash
-cover-vault hide ./my-codebase ./cover.png ./cover.stego.png --max-usage-ratio 0.40
+cover-vault hide ./my-codebase ./cover.pdf ./cover.stego.pdf \
+  --max-usage-ratio 0.40
 ```
 
-Use `1.0` only when you want to disable the ratio guard.
+Use `1.0` to disable the ratio guard. This does not make a high-ratio carrier discreet.
 
 ## Security model
 
 Cover Vault uses:
 
-- `scrypt` to derive a 256-bit key from the password and the exact original cover bytes,
-- `AES-256-GCM` for authenticated encryption,
-- a fresh random salt and nonce per hidden payload,
+- `scrypt` to derive a 256-bit key from the password and exact original cover bytes,
+- AES-256-GCM authenticated encryption,
+- a fresh random salt and nonce per payload,
 - a compressed `tar.gz` archive before encryption,
-- password-and-cover-derived pseudorandom placement of stego bits across the full carrier.
+- password-and-cover-derived pseudorandom bit placement for WAV and image modes.
 
-## Install for local development
+The original cover is part of key derivation. A modified, re-encoded, optimized, or otherwise non-identical original cover will not unlock the payload.
+
+Passwords supplied with `--password` may be visible in shell history or process listings. For interactive use, omit the option and enter the password at the prompt.
+
+## Installation for local development
+
+Requires Python 3.10 or newer.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -e .
 ```
 
@@ -139,57 +143,66 @@ Run tests:
 python -m pytest
 ```
 
-## Usage
+## Command-line usage
 
-### Check a cover file
-
-This prints the exact SHA-256 hash and detected payload capacities:
+### Inspect a cover
 
 ```bash
 cover-vault info ./cover.png
 cover-vault info ./cover.wav
+cover-vault info ./cover.pdf
 ```
 
-### Plan a hide operation
+This prints the exact SHA-256 hash, detected carrier modes, and capacity or reference-capacity values.
 
-```bash
-cover-vault plan ./my-codebase ./cover.png
-cover-vault plan ./my-codebase ./cover.wav --mode wav-lsb
-```
-
-### Hide a folder in an image
+### Hide in an image
 
 ```bash
 cover-vault hide ./my-codebase ./cover.png ./cover.stego.png
 ```
 
-With an explicit password for scripts or tests:
-
-```bash
-cover-vault hide ./my-codebase ./cover.png ./cover.stego.png \
-  --password "correct horse battery staple"
-```
-
-### Reveal a folder from an image
+### Reveal from an image
 
 ```bash
 cover-vault reveal ./cover.stego.png ./cover.png ./restored-codebase
 ```
 
-Or, if the exact original cover is available at a stable URL:
-
-```bash
-cover-vault reveal ./cover.stego.png "https://example.org/public-domain-cover.png" ./restored-codebase
-```
-
-### Hide a folder in a WAV file
+### Hide in WAV audio
 
 ```bash
 cover-vault hide ./my-codebase ./cover.wav ./cover.stego.wav --mode wav-lsb
 ```
 
-### Reveal a folder from a WAV file
+### Reveal from WAV audio
 
 ```bash
 cover-vault reveal ./cover.stego.wav ./cover.wav ./restored-codebase --mode wav-lsb
+```
+
+### Hide in a PDF
+
+```bash
+cover-vault hide ./my-codebase ./cover.pdf ./cover.stego.pdf
+```
+
+Or select the mode explicitly:
+
+```bash
+cover-vault hide ./my-codebase ./cover.pdf ./cover.stego.pdf --mode pdf-append
+```
+
+### Reveal from a PDF
+
+```bash
+cover-vault reveal ./cover.stego.pdf ./cover.pdf ./restored-codebase
+```
+
+### Use a remotely hosted original cover
+
+If the exact original cover remains available at a stable URL:
+
+```bash
+cover-vault reveal ./cover.stego.pdf \
+  "https://example.org/public-document.pdf" \
+  ./restored-codebase
 ```
