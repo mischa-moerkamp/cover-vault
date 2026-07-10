@@ -48,7 +48,7 @@ jobs:
           COVER_VAULT_VERSION: ${{ github.ref_name }}
         run: |
           export COVER_VAULT_VERSION="${COVER_VAULT_VERSION#v}"
-          ./packaging/macos/build.sh
+          bash ./packaging/macos/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
@@ -66,7 +66,8 @@ jobs:
           COVER_VAULT_VERSION: ${{ github.ref_name }}
         run: |
           export COVER_VAULT_VERSION="${COVER_VAULT_VERSION#v}"
-          ./packaging/linux/build.sh
+          chmod +x packaging/linux/build.sh
+          bash packaging/linux/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: linux-deb
