@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cover Vault
+Comment=Encrypt folders inside image, WAV, or PDF cover files
+Exec=/opt/cover-vault/CoverVault
+Icon=cover-vault
+Terminal=false
+Categories=Utility;Security;
+Keywords=encryption;steganography;vault;

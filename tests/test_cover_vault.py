@@ -252,3 +252,35 @@ def test_pdf_info_and_plan(tmp_path: Path) -> None:
     plan = plan_folder(source, cover)
     assert plan["mode"] == "pdf-append"
     assert plan["fits_ratio_limit"] is True
+
+
+def test_progress_callbacks_for_pdf_round_trip(tmp_path):
+    from cover_vault.progress import ProgressEvent
+
+    source = tmp_path / "source-progress"
+    source.mkdir()
+    (source / "hello.txt").write_text("progress test")
+    cover = tmp_path / "cover-progress.pdf"
+    make_pdf(cover, filler_bytes=5000)
+    stego = tmp_path / "vault-progress.pdf"
+    restored = tmp_path / "restored-progress"
+    hide_events = []
+    reveal_events = []
+
+    hide_folder(source, cover, stego, "password", max_usage_ratio=1.0, progress=hide_events.append)
+    reveal_folder(stego, cover, restored, "password", progress=reveal_events.append)
+
+    assert all(isinstance(event, ProgressEvent) for event in hide_events + reveal_events)
+    assert hide_events[0].fraction > 0
+    assert hide_events[-1].fraction == 1.0
+    assert reveal_events[-1].fraction == 1.0
+    assert (restored / "hello.txt").read_text() == "progress test"
+
+
+def test_gui_logic_helpers(tmp_path):
+    from cover_vault.gui_logic import build_excludes, suggested_output_path
+
+    excludes = build_excludes(True, "node_modules, dist; .venv")
+    assert ".git" not in excludes
+    assert {"node_modules", "dist", ".venv"}.issubset(set(excludes))
+    assert suggested_output_path(str(tmp_path / "photo.png")).endswith("photo.vault.png")

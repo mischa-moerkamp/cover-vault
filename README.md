@@ -206,3 +206,89 @@ cover-vault reveal ./cover.stego.pdf \
   "https://example.org/public-document.pdf" \
   ./restored-codebase
 ```
+
+## Desktop application
+
+Cover Vault includes a cross-platform graphical interface with:
+
+- folder, cover-file, output-file, and restore-destination pickers,
+- masked password and password-confirmation fields,
+- automatic carrier detection or explicit image, WAV, and PDF modes,
+- a capacity preview showing estimated encrypted size, carrier usage, and fit status,
+- configurable maximum usage ratio,
+- optional inclusion of Git history and comma-separated custom exclusions,
+- progress and status reporting while work runs outside the UI thread,
+- create-vault and restore-vault tabs.
+
+Run the GUI from a development checkout:
+
+```bash
+pip install -e .
+cover-vault-gui
+```
+
+You can also start it as a module:
+
+```bash
+python -m cover_vault.gui
+```
+
+The GUI deliberately keeps passwords in memory only for the duration of an operation and clears the password fields after a successful create or restore. It does not store passwords in preferences or pass them through command-line arguments.
+
+## Building desktop installers
+
+Installer builds are platform-specific because PyInstaller must build on the operating system it targets. The repository includes local build scripts and a GitHub Actions workflow at `.github/workflows/release.yml`.
+
+### Windows installer
+
+Requirements:
+
+- Python 3.10 or newer,
+- Inno Setup 6 available as `iscc.exe`.
+
+Build from PowerShell:
+
+```powershell
+.\packaging\windows\build.ps1
+```
+
+This creates an Inno Setup `.exe` installer under `dist\installer`. The installer creates a Start Menu shortcut and offers an optional desktop shortcut.
+
+### macOS disk image
+
+Build on macOS:
+
+```bash
+./packaging/macos/build.sh
+```
+
+This creates a `.dmg` containing `Cover Vault.app` and an Applications link. Users install it by dragging the application into Applications. macOS applications normally appear in Launchpad and Spotlight rather than installing a desktop shortcut.
+
+For public distribution, sign the `.app` with an Apple Developer ID and notarize the final DMG. The included script builds an unsigned development artifact.
+
+### Linux Debian package
+
+Build on a Debian or Ubuntu system:
+
+```bash
+./packaging/linux/build.sh
+```
+
+This creates an `amd64` `.deb` under `dist`. Installation adds Cover Vault to the desktop environment's application menu through a `.desktop` launcher and installs the application icon. Users can pin or copy that launcher to the desktop according to their desktop environment's policy.
+
+### Automated release builds
+
+Push a version tag such as `v1.0.0`, or run the workflow manually, to build all three artifacts on native GitHub-hosted runners. Artifacts are uploaded separately as:
+
+- `windows-installer`,
+- `macos-dmg`,
+- `linux-deb`.
+
+The workflow runs the test suite before building packages. Production releases should additionally configure Windows code signing and Apple signing/notarization secrets.
+
+## Desktop packaging notes
+
+- `cover-vault-gui.spec` is the shared PyInstaller specification.
+- `assets/cover-vault.svg` is used by the Linux desktop launcher. Optional `.ico` and `.icns` files can be placed in the same directory for branded Windows and macOS binaries; builds fall back to the default application icon when they are absent.
+- The generated application remains fully offline except when a user explicitly supplies an HTTP(S) original-cover URL during restore through the command-line interface. The current GUI uses local file pickers only.
+- The Windows and Linux packages target 64-bit systems. Additional architectures should be built on matching runners and labeled separately.
