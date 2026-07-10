@@ -65,7 +65,16 @@ jobs:
         env:
           COVER_VAULT_VERSION: ${{ github.ref_name }}
         run: |
-          export COVER_VAULT_VERSION="${COVER_VAULT_VERSION#v}"
+          RAW_VERSION="${COVER_VAULT_VERSION#v}"
+
+          # Debian versions must start with a digit.
+          if [[ "$RAW_VERSION" =~ ^[0-9] ]]; then
+            export COVER_VAULT_VERSION="$RAW_VERSION"
+          else
+            # Fallback for non-tag refs like "main"
+            export COVER_VAULT_VERSION="0.0.0+${GITHUB_RUN_NUMBER}"
+          fi
+
           chmod +x packaging/linux/build.sh
           bash packaging/linux/build.sh
       - uses: actions/upload-artifact@v4
