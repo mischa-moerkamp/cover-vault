@@ -53,7 +53,7 @@ jobs:
           }
           $env:COVER_VAULT_VERSION = $version
           ./packaging/windows/build.ps1
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-installer
           path: dist/installer/*.exe
@@ -80,7 +80,7 @@ jobs:
             export COVER_VAULT_VERSION="0.0.0.${GITHUB_RUN_NUMBER}"
           fi
           bash ./packaging/macos/build.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-dmg
           path: dist/*.dmg
@@ -108,7 +108,7 @@ jobs:
           fi
           chmod +x packaging/linux/build.sh
           bash packaging/linux/build.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-deb
           path: dist/*.deb
