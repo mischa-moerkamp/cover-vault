@@ -297,6 +297,22 @@ def cover_info(cover_source: Path | str) -> dict:
     return result
 
 
+def estimate_folder_payload(
+    source_folder: Path | str,
+    excludes: Iterable[str] = DEFAULT_EXCLUDES,
+) -> dict:
+    """Estimate the compressed and encrypted size without requiring a cover."""
+
+    archive_bytes, files_added = make_archive(source_folder, excludes=excludes)
+    return {
+        "files_to_encrypt": files_added,
+        "archive_bytes": len(archive_bytes),
+        "estimated_payload_bytes": encrypted_payload_size_for_plaintext(
+            len(archive_bytes)
+        ),
+    }
+
+
 def plan_folder(
     source_folder: Path | str,
     cover_source: Path | str,
@@ -306,10 +322,10 @@ def plan_folder(
 ) -> dict:
     """Estimate whether a source folder fits into a cover before asking for a password."""
 
+    estimate = estimate_folder_payload(source_folder, excludes=excludes)
     cover_bytes = read_cover(cover_source)
     detected_mode = _detect_hide_mode(cover_bytes, mode)
-    archive_bytes, files_added = make_archive(source_folder, excludes=excludes)
-    estimated_payload_bytes = encrypted_payload_size_for_plaintext(len(archive_bytes))
+    estimated_payload_bytes = estimate["estimated_payload_bytes"]
     capacity_bytes = _capacity_for_mode(detected_mode, cover_bytes)
     usage = _usage_result(estimated_payload_bytes, capacity_bytes)
     fits_capacity = estimated_payload_bytes <= capacity_bytes
@@ -332,8 +348,8 @@ def plan_folder(
         if detected_mode in {"wav-lsb", "image-lsb"}
         else None,
         "mode": detected_mode,
-        "files_to_encrypt": files_added,
-        "archive_bytes": len(archive_bytes),
+        "files_to_encrypt": estimate["files_to_encrypt"],
+        "archive_bytes": estimate["archive_bytes"],
         "estimated_payload_bytes": estimated_payload_bytes,
         "capacity_bytes": capacity_bytes,
         "usage_ratio": usage["usage_ratio"],

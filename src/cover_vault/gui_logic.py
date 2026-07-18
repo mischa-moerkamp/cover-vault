@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from .archive import DEFAULT_EXCLUDES, GIT_HISTORY_EXCLUDE
 
 MODES = ("auto", "image-lsb", "wav-lsb", "pdf-attachment")
+_SUPPORTED_SUFFIXES = {".png", ".bmp", ".tif", ".tiff", ".wav", ".pdf"}
 
 
 def build_excludes(include_git_history: bool, custom_text: str) -> tuple[str, ...]:
@@ -19,12 +21,49 @@ def build_excludes(include_git_history: bool, custom_text: str) -> tuple[str, ..
     return tuple(sorted(defaults | custom))
 
 
-def suggested_output_path(cover_path: str) -> str:
-    if not cover_path:
+def cover_suffix(cover_source: str) -> str:
+    if not cover_source:
         return ""
-    path = Path(cover_path).expanduser()
-    suffix = path.suffix
-    return str(path.with_name(f"{path.stem}.vault{suffix}"))
+    parsed = urlparse(cover_source)
+    if parsed.scheme.lower() in {"http", "https"}:
+        path = unquote(parsed.path)
+        suffix = Path(path).suffix.lower()
+        if suffix in _SUPPORTED_SUFFIXES:
+            return suffix
+        if "/pdf/" in f"{path.rstrip('/')}/":
+            return ".pdf"
+        return ""
+    return Path(cover_source).expanduser().suffix
+
+
+def suggested_output_filename(cover_source: str) -> str:
+    if not cover_source:
+        return ""
+    parsed = urlparse(cover_source)
+    if parsed.scheme.lower() in {"http", "https"}:
+        path = unquote(parsed.path).rstrip("/")
+        name = Path(path).name or "remote-cover"
+        suffix = cover_suffix(cover_source)
+        raw_suffix = Path(name).suffix.lower()
+        stem = Path(name).stem if raw_suffix in _SUPPORTED_SUFFIXES else name
+        if "/pdf/" in f"{path}/" and not stem.lower().startswith("arxiv-"):
+            stem = f"arxiv-{stem}"
+        return f"{stem}.vault{suffix or '.cover'}"
+    path = Path(cover_source).expanduser()
+    return f"{path.stem}.vault{path.suffix}"
+
+
+def suggested_output_path(cover_source: str) -> str:
+    if not cover_source:
+        return ""
+    parsed = urlparse(cover_source)
+    filename = suggested_output_filename(cover_source)
+    if parsed.scheme.lower() in {"http", "https"}:
+        downloads = Path.home() / "Downloads"
+        directory = downloads if downloads.is_dir() else Path.home()
+        return str(directory / filename)
+    path = Path(cover_source).expanduser()
+    return str(path.with_name(filename))
 
 
 def format_bytes(value: int) -> str:

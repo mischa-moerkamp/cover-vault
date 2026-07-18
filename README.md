@@ -1,5 +1,9 @@
 # Cover Vault
 
+## Downloads
+
+Download the current Windows installer, macOS disk image, or Linux Debian package from the [latest GitHub Release](../../releases/latest). Version-tag builds publish these files as permanent release assets; manually dispatched builds remain available from their Actions run.
+
 Cover Vault encrypts the current filesystem state of a folder and stores the encrypted archive in a carrier that remains usable as an ordinary WAV, lossless image, or PDF document.
 
 ```text
@@ -13,7 +17,7 @@ To reveal any vault, you need:
 
 1. the carrier file containing the encrypted vault,
 2. the password, and
-3. the exact original cover-file bytes, from a local file or the original download URL.
+3. the exact original cover-file bytes. A URL can be used, but a preserved local copy is safer because remote content can change or disappear.
 
 The original cover is included in password-based key derivation. Re-saving, optimizing, re-encoding, or otherwise changing it produces different bytes and prevents recovery.
 
@@ -236,24 +240,50 @@ cover-vault hide ./my-codebase ./cover.pdf ./cover.stego.pdf --mode pdf-attachme
 cover-vault reveal ./cover.stego.pdf ./cover.pdf ./restored-codebase
 ```
 
-### Use a remotely hosted original cover
+### Use a remotely hosted cover
 
-If the exact original cover remains available at a stable URL:
+HTTP(S) cover URLs are accepted by `hide`, `plan`, `info`, and `reveal`:
 
 ```bash
-cover-vault reveal ./cover.stego.pdf \
+cover-vault hide ./my-codebase \
   "https://example.org/public-document.pdf" \
+  ./public-document.vault.pdf
+```
+
+For URL-based creation, Cover Vault downloads the file once into its bounded cache and, by default, saves two recovery files beside the vault:
+
+- an exact, hash-named copy such as `public-document.vault.original-cover-a1b2c3d4e5f6.pdf`,
+- a `public-document.vault.cover-receipt.json` file recording the source URL, final redirected URL, retrieval time, byte count, and SHA-256 hash.
+
+Use the preserved local cover for recovery rather than relying on the URL. Disable preservation in the CLI only with `--no-preserve-remote-cover`. HTTPS is strongly preferred; the desktop app requires explicit confirmation before using plain HTTP.
+
+```bash
+cover-vault reveal ./public-document.vault.pdf \
+  ./public-document.vault.original-cover-a1b2c3d4e5f6.pdf \
   ./restored-codebase
 ```
+
+### Find a suitably sized arXiv PDF
+
+Cover Vault can estimate the encrypted payload and search recent arXiv metadata for PDFs whose probed download size satisfies the selected PDF size ratio:
+
+```bash
+cover-vault find-arxiv ./my-codebase "cryptography systems"
+cover-vault find-arxiv ./my-codebase "machine learning" --max-usage-ratio 0.15
+```
+
+The command and desktop search only return PDFs whose reported size is at least the calculated minimum and no larger than the 256 MiB remote-cover limit. Search results are never selected automatically. Review the paper, attribution, and licence before using or redistributing it. arXiv PDF attachment mode is still discoverable as an embedded attachment; choosing a larger PDF changes the size ratio but does not make the attachment covert.
 
 ## Desktop application
 
 Cover Vault includes a cross-platform graphical interface with:
 
-- folder, cover-file, output-file, and restore-destination pickers,
+- folder, local-cover, output-file, and restore-destination pickers, plus editable HTTPS URL fields,
 - masked password and password-confirmation fields,
 - automatic carrier detection or explicit image, WAV, and PDF modes,
-- a capacity preview showing estimated encrypted size, carrier usage, and fit status,
+- a capacity preview showing estimated encrypted size, carrier usage, fit status, remote final URL, and SHA-256,
+- opt-in arXiv PDF discovery filtered by the source folder's required cover size,
+- one-download remote-cover caching with progress reporting and optional exact-cover preservation,
 - configurable maximum usage ratio,
 - optional inclusion of Git history and comma-separated custom exclusions,
 - an explicit checkbox before an existing output vault may be replaced,
@@ -318,17 +348,17 @@ This creates an `amd64` `.deb` under `dist`. Installation adds Cover Vault to th
 
 ### Automated release builds
 
-Push a version tag matching `pyproject.toml` (for example `v2.1.0`), or run the workflow manually, to build all three artifacts on native GitHub-hosted runners. Local and CI installer scripts reject a version override that disagrees with the package version. Artifacts are uploaded separately as:
+Push a version tag matching `pyproject.toml` (for example `v2.2.0`) to build all three installers on native GitHub-hosted runners and publish them as assets of a GitHub Release. Running the workflow manually builds the same artifacts for testing but deliberately does not create a release. Local and CI installer scripts reject a version override that disagrees with the package version. Intermediate workflow artifacts are uploaded separately as:
 
 - `windows-installer`,
 - `macos-dmg`,
 - `linux-deb`.
 
-The workflow runs Ruff formatting/lint checks and the full test suite before building packages. Production releases should additionally configure Windows code signing and Apple signing/notarization secrets.
+The workflow runs Ruff formatting/lint checks and the full test suite before building packages. Tag builds merge the platform outputs, retain platform-specific checksum files, generate release notes, and publish a GitHub Release. The README download link above always points to the latest published release. Production releases should additionally configure Windows code signing and Apple signing/notarization secrets.
 
 ## Desktop packaging notes
 
 - `cover-vault-gui.spec` is the shared PyInstaller specification.
 - `assets/cover-vault.svg` is used by the Linux desktop launcher. Optional `.ico` and `.icns` files can be placed in the same directory for branded Windows and macOS binaries; builds fall back to the default application icon when they are absent.
-- The generated application remains fully offline except when a user explicitly supplies an HTTP(S) original-cover URL during restore through the command-line interface. The current GUI uses local file pickers only.
+- The generated application remains offline unless the user enters a cover URL or starts an arXiv search. Remote downloads are bounded to 256 MiB, cached by exact SHA-256, and never performed silently.
 - The Windows and Linux packages target 64-bit systems. Additional architectures should be built on matching runners and labeled separately.

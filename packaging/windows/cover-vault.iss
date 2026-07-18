@@ -1,7 +1,7 @@
 #define MyAppName "Cover Vault"
 #define MyAppVersion GetEnv("COVER_VAULT_VERSION")
 #if MyAppVersion == ""
-  #define MyAppVersion "2.1.0"
+  #define MyAppVersion "2.2.0"
 #endif
 #define MyAppPublisher "Cover Vault"
 #define MyAppExeName "CoverVault.exe"

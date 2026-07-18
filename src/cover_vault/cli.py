@@ -7,9 +7,18 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from .archive import DEFAULT_EXCLUDES, GIT_HISTORY_EXCLUDE
+from .arxiv import minimum_pdf_bytes_for_folder, search_arxiv_pdfs
+from .cover import cache_remote_cover, is_remote_cover_source, preserve_cached_cover
 from .errors import CoverVaultError
+from .gui_logic import format_bytes
 from .stego import DEFAULT_MAX_USAGE_RATIO
-from .vault import cover_info, hide_folder, plan_folder, reveal_folder
+from .vault import (
+    cover_info,
+    estimate_folder_payload,
+    hide_folder,
+    plan_folder,
+    reveal_folder,
+)
 
 
 def _package_version() -> str:
@@ -48,20 +57,26 @@ def _add_exclude_args(parser: argparse.ArgumentParser) -> None:
         "--exclude",
         action="append",
         default=[],
-        help="Folder or file name to exclude. Can be repeated, e.g. --exclude node_modules --exclude dist.",
+        help=(
+            "Folder or file name to exclude. Can be repeated, e.g. "
+            "--exclude node_modules --exclude dist."
+        ),
     )
     parser.add_argument(
         "--include-git-history",
         action="store_true",
         help=(
-            "Include the .git directory so the encrypted archive contains Git commit history. "
-            "Other default excludes still apply."
+            "Include the .git directory so the encrypted archive contains Git commit "
+            "history. Other default excludes still apply."
         ),
     )
     parser.add_argument(
         "--no-default-excludes",
         action="store_true",
-        help="Do not apply default excludes such as .git, .hg, .svn, __pycache__, and .DS_Store.",
+        help=(
+            "Do not apply default excludes such as .git, .hg, .svn, __pycache__, "
+            "and .DS_Store."
+        ),
     )
 
 
@@ -70,7 +85,10 @@ def _add_mode_arg(parser: argparse.ArgumentParser) -> None:
         "--mode",
         choices=("auto", "wav-lsb", "image-lsb", "pdf-attachment"),
         default="auto",
-        help="Carrier mode. auto selects PCM WAV, lossless image LSB, or PDF embedded-attachment mode from the cover type.",
+        help=(
+            "Carrier mode. auto selects PCM WAV, lossless image LSB, or PDF "
+            "embedded-attachment mode from the cover type."
+        ),
     )
 
 
@@ -80,8 +98,9 @@ def _add_usage_arg(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=DEFAULT_MAX_USAGE_RATIO,
         help=(
-            "Fail if the encrypted payload would use more than this fraction of the cover capacity. "
-            f"Default: {DEFAULT_MAX_USAGE_RATIO:.2f}. Use 1.0 to disable the ratio guard."
+            "Fail if the encrypted payload would use more than this fraction of the "
+            f"cover capacity. Default: {DEFAULT_MAX_USAGE_RATIO:.2f}. Use 1.0 to "
+            "disable the ratio guard."
         ),
     )
 
@@ -89,7 +108,10 @@ def _add_usage_arg(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cover-vault",
-        description="Encrypt folders and store them in lossless audio, image, or PDF carrier files.",
+        description=(
+            "Encrypt folders and store them in lossless audio, image, or PDF carrier "
+            "files."
+        ),
     )
     parser.add_argument(
         "--version", action="version", version=f"cover-vault {_package_version()}"
@@ -109,7 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     hide.add_argument(
         "output",
         type=Path,
-        help="Output stego file. Use .wav for WAV mode, .png/.bmp/.tiff for image mode, or .pdf for PDF mode.",
+        help=(
+            "Output stego file. Use .wav for WAV mode, .png/.bmp/.tiff for image "
+            "mode, or .pdf for PDF mode."
+        ),
     )
     _add_mode_arg(hide)
     _add_usage_arg(hide)
@@ -117,7 +142,18 @@ def build_parser() -> argparse.ArgumentParser:
     hide.add_argument(
         "--overwrite-output",
         action="store_true",
-        help="Replace an existing output vault. The original cover itself is never allowed as output.",
+        help=(
+            "Replace an existing output vault. The original cover itself is never "
+            "allowed as output."
+        ),
+    )
+    hide.add_argument(
+        "--no-preserve-remote-cover",
+        action="store_true",
+        help=(
+            "Do not copy an exact downloaded cover and JSON receipt beside the vault. "
+            "Preservation is enabled by default for URL covers."
+        ),
     )
     _add_exclude_args(hide)
 
@@ -162,6 +198,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_usage_arg(plan)
     _add_exclude_args(plan)
 
+    find_arxiv = subparsers.add_parser(
+        "find-arxiv",
+        help="Find arXiv PDFs large enough for a folder.",
+    )
+    find_arxiv.add_argument(
+        "source",
+        type=Path,
+        help="Folder to encrypt. VCS history is excluded by default.",
+    )
+    find_arxiv.add_argument("query", help="Keywords to search in arXiv metadata.")
+    find_arxiv.add_argument(
+        "--max-results",
+        type=int,
+        default=25,
+        help="Number of recent arXiv records to probe (1-50; default: 25).",
+    )
+    _add_usage_arg(find_arxiv)
+    _add_exclude_args(find_arxiv)
+
     return parser
 
 
@@ -170,7 +225,8 @@ def _print_usage(result: dict) -> None:
     print(f"Cover usage: {result['usage_percent']:.2f}%")
     if result.get("usage_warning"):
         print(
-            "Note: usage is above 10%. A larger cover or smaller source is recommended for lower distortion."
+            "Note: usage is above 10%. A larger cover or smaller source is "
+            "recommended for lower distortion."
         )
 
 
@@ -181,9 +237,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "hide":
             password = _password_from_args(args, confirm=True)
+            cover_source = args.cover
+            cached = None
+            if is_remote_cover_source(args.cover):
+                if args.cover.lower().startswith("http://"):
+                    print(
+                        "Warning: plain HTTP can be changed in transit.",
+                        file=sys.stderr,
+                    )
+                cached = cache_remote_cover(args.cover, allow_http=True)
+                cover_source = cached.local_path
             result = hide_folder(
                 args.source,
-                args.cover,
+                cover_source,
                 args.output,
                 password=password,
                 mode=args.mode,
@@ -192,11 +258,24 @@ def main(argv: list[str] | None = None) -> int:
                 overwrite_output=args.overwrite_output,
             )
             print(
-                f"Hidden encrypted archive with {result['files_encrypted']} files in {result['output']} "
-                f"using {result['mode']} mode. Payload: {result['payload_bytes']} bytes."
+                f"Hidden encrypted archive with {result['files_encrypted']} files in "
+                f"{result['output']} using {result['mode']} mode. Payload: "
+                f"{result['payload_bytes']} bytes."
             )
             _print_usage(result)
             print(f"Original cover SHA-256: {result['cover_sha256']}")
+            if cached is not None and not args.no_preserve_remote_cover:
+                try:
+                    original, receipt = preserve_cached_cover(cached, args.output)
+                except CoverVaultError as exc:
+                    print(
+                        "Warning: the vault was created, but the downloaded original "
+                        f"cover could not be preserved: {exc}",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"Preserved exact original cover: {original}")
+                    print(f"Cover receipt: {receipt}")
             return 0
 
         if args.command == "reveal":
@@ -210,8 +289,8 @@ def main(argv: list[str] | None = None) -> int:
                 overwrite=args.overwrite,
             )
             print(
-                f"Restored {result['files_decrypted']} files into {result['destination']} "
-                f"using {result['mode']} mode."
+                f"Restored {result['files_decrypted']} files into "
+                f"{result['destination']} using {result['mode']} mode."
             )
             print(f"Original cover SHA-256: {result['cover_sha256']}")
             return 0
@@ -245,12 +324,44 @@ def main(argv: list[str] | None = None) -> int:
             _print_usage(result)
             print(f"Fits raw capacity: {'yes' if result['fits_capacity'] else 'no'}")
             print(
-                f"Fits ratio limit ({result['max_usage_ratio']:.2%}): {'yes' if result['fits_ratio_limit'] else 'no'}"
+                f"Fits ratio limit ({result['max_usage_ratio']:.2%}): "
+                f"{'yes' if result['fits_ratio_limit'] else 'no'}"
             )
             if result["advisory"]:
                 print(f"Advisory: {result['advisory']}")
             print(f"Original cover SHA-256: {result['cover_sha256']}")
             return 0 if result["fits_capacity"] and result["fits_ratio_limit"] else 1
+
+        if args.command == "find-arxiv":
+            estimate = estimate_folder_payload(
+                args.source, excludes=_excludes_from_args(args)
+            )
+            minimum = minimum_pdf_bytes_for_folder(
+                estimate["estimated_payload_bytes"], args.max_usage_ratio
+            )
+            print(
+                f"Estimated encrypted payload: "
+                f"{format_bytes(estimate['estimated_payload_bytes'])}"
+            )
+            print(
+                f"Minimum PDF reference size at {args.max_usage_ratio:.0%} usage: "
+                f"{format_bytes(minimum)}"
+            )
+            candidates = search_arxiv_pdfs(
+                args.query,
+                minimum_bytes=minimum,
+                max_results=args.max_results,
+            )
+            if not candidates:
+                print("No suitable arXiv PDF was found among the probed results.")
+                return 1
+            for candidate in candidates:
+                print(
+                    f"{format_bytes(candidate.size_bytes):>12}  "
+                    f"{candidate.arxiv_id:<18}  {candidate.title}"
+                )
+                print(f"  {candidate.pdf_url}")
+            return 0
 
         parser.error("Unknown command.")
         return 2
