@@ -1,6 +1,6 @@
 # Cover Vault
 
-Cover Vault encrypts the current filesystem state of a folder and stores the encrypted archive inside a cover file that remains usable as an ordinary WAV, lossless image, or PDF document.
+Cover Vault encrypts the current filesystem state of a folder and stores the encrypted archive in a carrier that remains usable as an ordinary WAV, lossless image, or PDF document.
 
 ```text
 codebase/                    # folder to protect; Git history excluded by default
@@ -9,13 +9,13 @@ cover.stego.wav/png/pdf      # cover carrying the encrypted folder payload
 restored-codebase/           # recovered folder after reveal
 ```
 
-To reveal a WAV or image vault, you need:
+To reveal any vault, you need:
 
-1. the stego file,
+1. the carrier file containing the encrypted vault,
 2. the password, and
 3. the exact original cover-file bytes, from a local file or the original download URL.
 
-PDF mode also asks for the original cover, but the current trailing-data PDF format preserves the original PDF as the beginning of the stego file. The PDF cover must therefore not be treated as an independent secret or second factor.
+The original cover is included in password-based key derivation. Re-saving, optimizing, re-encoding, or otherwise changing it produces different bytes and prevents recovery.
 
 ## What gets archived
 
@@ -73,20 +73,20 @@ Recommended covers:
 
 JPEG and lossy WebP output are not supported because lossy encoding can destroy the hidden bits.
 
-### `pdf-append`
+### `pdf-attachment`
 
-Appends a structured encrypted payload after the PDF's final `%%EOF` marker. Many PDF readers tolerate trailing data, so the resulting file normally remains viewable as a PDF.
+Stores the encrypted vault as a standard PDF embedded-file attachment named `cover-vault.cvault`. The PDF is parsed and rewritten with a normal cross-reference table, trailer, `startxref`, and final `%%EOF`. Existing attachments are retained.
 
 Important differences from the LSB modes:
 
-- PDF mode does not alter page pixels, text, or existing PDF objects.
-- The encrypted folder remains protected by the password-based encryption.
-- The appended block is easy to discover through file inspection and is not rigorous steganography.
-- The result is not a standards-compliant incremental PDF update. Strict validators or document gateways may reject or rewrite it.
-- PDF optimization, sanitization, linearization, or “Save As” operations may remove the payload.
-- The original PDF bytes remain present at the start of the stego file, so the cover is not an independent recovery factor in this mode.
+- The output is a structurally valid PDF rather than a file with arbitrary bytes after `%%EOF`.
+- Page pixels and text are not used as a steganographic channel.
+- The encrypted attachment is easy to discover with PDF inspection or attachment tools. This mode is a standards-based encrypted container, not covert steganography.
+- PDF sanitizers, attachment-removal tools, optimization software, or some “Save As” operations may remove embedded files.
+- Rewriting a digitally signed PDF invalidates its existing signatures, so signed PDFs should not be used as covers.
+- Encrypted/password-protected PDF covers and PDFs that already contain the reserved attachment name are rejected.
 
-Use PDF mode as a convenient encrypted container that still opens in many readers, not as a covert or archival-grade PDF mechanism. Keep a separate backup of important vaults.
+Use PDF attachment mode when PDF compatibility matters more than concealment. Keep a separate tested backup of important vaults.
 
 ## Capacity and cover selection
 
@@ -95,10 +95,10 @@ Use `plan` before hiding:
 ```bash
 cover-vault plan ./my-codebase ./cover.png
 cover-vault plan ./my-codebase ./cover.wav --mode wav-lsb
-cover-vault plan ./my-codebase ./cover.pdf --mode pdf-append
+cover-vault plan ./my-codebase ./cover.pdf --mode pdf-attachment
 ```
 
-For WAV and image modes, capacity is based on the number of available LSB positions. For PDF mode, the original PDF file size is used as the reference denominator because appended data is not constrained by a fixed physical bit capacity.
+For WAV and image modes, capacity is based on the number of available LSB positions. A PDF attachment has no fixed steganographic capacity, so the original PDF file size is used only as a reference denominator for the size-ratio guard.
 
 The default maximum usage ratio is 25%:
 
@@ -106,7 +106,7 @@ The default maximum usage ratio is 25%:
 max usage ratio = encrypted payload bytes / reference capacity bytes
 ```
 
-Cover Vault warns above 10% and refuses the operation above 25%. Lower ratios generally make file-size changes and carrier modifications less conspicuous.
+Cover Vault warns above 10% and refuses the operation above 25%. Lower ratios generally make carrier changes less conspicuous, although a PDF attachment remains directly discoverable regardless of ratio.
 
 Raise the limit explicitly when required:
 
@@ -129,13 +129,13 @@ New vaults use format version 2 with:
 - a compressed `tar.gz` archive before encryption,
 - a small non-secret LSB bootstrap containing only bounded KDF parameters, followed by keyed pseudorandom payload placement.
 
-The LSB bootstrap allows recovery software to perform the memory-hard KDF before it can locate and verify the hidden marker. This prevents the earlier format from exposing a cheap SHA-256 password-check path. New image and WAV vaults are always written using this version-2 placement design.
+The LSB bootstrap allows recovery software to perform the memory-hard KDF before it can locate and verify the hidden marker. This avoids exposing a cheap password-check path. Image and WAV vaults use only this version-2 placement design.
 
 KDF metadata, nonce lengths, header sizes, archive member counts, extraction sizes, and path depth are validated before expensive or destructive operations. Output carrier files are written through a temporary sibling file and atomically replaced only after a successful write. Folder restoration is staged in a temporary directory, so a malformed archive does not erase an existing destination before validation completes.
 
-Version-1 encrypted payloads and the earlier image/WAV placement format remain readable for migration, but newly created vaults use version 2. Re-create important old vaults to receive the stronger KDF, authenticated metadata, and safer placement scheme.
+Only version-2 payloads and placement metadata are accepted. Removing compatibility code reduces parser complexity and prevents accidental acceptance of the weaker 1.x format. Vaults made with 1.x must be restored using that release and then recreated.
 
-The original WAV or image cover is part of key derivation. A modified, re-encoded, optimized, or otherwise non-identical original cover will not unlock the payload. As noted above, PDF trailing-data mode does not provide the same independent-cover property because the original PDF prefix is retained inside the output.
+The exact original WAV, image, or PDF cover is part of key derivation. A modified, re-encoded, optimized, or otherwise non-identical original cover will not unlock the payload.
 
 Passwords supplied with `--password` may be visible in shell history or process listings. For interactive use, omit the option and enter the password at the prompt.
 
@@ -213,7 +213,7 @@ cover-vault hide ./my-codebase ./cover.pdf ./cover.stego.pdf
 Or select the mode explicitly:
 
 ```bash
-cover-vault hide ./my-codebase ./cover.pdf ./cover.stego.pdf --mode pdf-append
+cover-vault hide ./my-codebase ./cover.pdf ./cover.stego.pdf --mode pdf-attachment
 ```
 
 ### Reveal from a PDF
@@ -303,7 +303,7 @@ This creates an `amd64` `.deb` under `dist`. Installation adds Cover Vault to th
 
 ### Automated release builds
 
-Push a version tag such as `v1.0.0`, or run the workflow manually, to build all three artifacts on native GitHub-hosted runners. Artifacts are uploaded separately as:
+Push a version tag such as `v2.0.0`, or run the workflow manually, to build all three artifacts on native GitHub-hosted runners. Artifacts are uploaded separately as:
 
 - `windows-installer`,
 - `macos-dmg`,

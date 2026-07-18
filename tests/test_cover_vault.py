@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import io
 import math
+import os
 import wave
 from pathlib import Path
 
 import pytest
 from PIL import Image
+from pypdf import PdfReader, PdfWriter
 
 from cover_vault.archive import DEFAULT_EXCLUDES, GIT_HISTORY_EXCLUDE
 from cover_vault.cli import _excludes_from_args
@@ -59,20 +62,13 @@ def make_png(path: Path, size: tuple[int, int] = (180, 180)) -> None:
 
 
 def make_pdf(path: Path, filler_bytes: int = 20_000) -> None:
-    # Minimal one-page PDF followed by a large comment block. PDF readers ignore
-    # comments, making this a deterministic, dependency-free test cover.
-    body = (
-        b"%PDF-1.4\n"
-        b"1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\n"
-        b"2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj\n"
-        b"3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>endobj\n"
-        + b"%"
-        + (b" cover-vault-test" * (filler_bytes // 17 + 1))[:filler_bytes]
-        + b"\n"
-        b"xref\n0 4\n0000000000 65535 f \n"
-        b"trailer<< /Root 1 0 R /Size 4 >>\nstartxref\n0\n%%EOF\n"
-    )
-    path.write_bytes(body)
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.add_metadata({"/Title": "Cover Vault test PDF"})
+    if filler_bytes:
+        writer.add_attachment("cover-notes.bin", os.urandom(filler_bytes))
+    with path.open("wb") as output:
+        writer.write(output)
 
 
 def assert_restored(restored: Path) -> None:
@@ -221,7 +217,7 @@ def test_info_and_plan_report_capacity(tmp_path: Path) -> None:
     assert plan["fits_ratio_limit"] is True
 
 
-def test_pdf_append_roundtrip_and_auto_detection(tmp_path: Path) -> None:
+def test_pdf_attachment_roundtrip_and_auto_detection(tmp_path: Path) -> None:
     source = tmp_path / "source"
     cover = tmp_path / "cover.pdf"
     stego = tmp_path / "cover.stego.pdf"
@@ -230,12 +226,16 @@ def test_pdf_append_roundtrip_and_auto_detection(tmp_path: Path) -> None:
     make_pdf(cover)
 
     result = hide_folder(source, cover, stego, "password")
-    assert result["mode"] == "pdf-append"
-    assert stego.read_bytes().startswith(cover.read_bytes())
+    assert result["mode"] == "pdf-attachment"
+    pdf_bytes = stego.read_bytes()
+    assert pdf_bytes.rstrip().endswith(b"%%EOF")
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    assert reader.attachments["cover-vault.cvault"]
+    assert reader.attachments["cover-notes.bin"]
     assert result["usage_ratio"] < 0.25
 
     revealed = reveal_folder(stego, cover, restored, "password")
-    assert revealed["mode"] == "pdf-append"
+    assert revealed["mode"] == "pdf-attachment"
     assert_restored(restored)
 
 
@@ -246,11 +246,11 @@ def test_pdf_info_and_plan(tmp_path: Path) -> None:
     make_pdf(cover)
 
     info = cover_info(cover)
-    assert info["supported_modes"] == ["pdf-append"]
-    assert info["capacities"]["pdf-append"] == cover.stat().st_size
+    assert info["supported_modes"] == ["pdf-attachment"]
+    assert info["capacities"]["pdf-attachment"] == cover.stat().st_size
 
     plan = plan_folder(source, cover)
-    assert plan["mode"] == "pdf-append"
+    assert plan["mode"] == "pdf-attachment"
     assert plan["fits_ratio_limit"] is True
 
 
@@ -297,97 +297,32 @@ def test_gui_logic_helpers(tmp_path):
     )
 
 
-def _legacy_v1_payload(
-    archive_bytes: bytes, password: str, cover_bytes: bytes
-) -> bytes:
-    import base64
+def test_version_1_payload_metadata_is_rejected() -> None:
     import json
-    import os
     import struct
 
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cover_vault.crypto import PAYLOAD_MAGIC, decrypt_payload, encrypt_payload
 
-    from cover_vault.crypto import (
-        CIPHER_NAME,
-        KDF_NAME,
-        LEGACY_AAD,
-        PAYLOAD_MAGIC,
-        KdfParams,
-        derive_master_key,
-    )
-
-    params = KdfParams(
-        name=KDF_NAME,
-        salt=base64.urlsafe_b64encode(os.urandom(16)).decode("ascii"),
-        n=2**15,
-        r=8,
-        p=1,
-        length=32,
-    )
-    nonce = os.urandom(12)
-    header = {
-        "version": 1,
-        "cipher": CIPHER_NAME,
-        "kdf": params.to_dict(),
-        "nonce": base64.urlsafe_b64encode(nonce).decode("ascii"),
-        "archive": "tar.gz",
-        "aad": LEGACY_AAD.decode("ascii"),
-    }
-    header_bytes = json.dumps(header, sort_keys=True, separators=(",", ":")).encode(
+    cover_bytes = b"valid cover bytes"
+    payload = encrypt_payload(b"secret archive", "password", cover_bytes)
+    offset = len(PAYLOAD_MAGIC)
+    header_len = struct.unpack(">I", payload[offset : offset + 4])[0]
+    header_start = offset + 4
+    header_end = header_start + header_len
+    header = json.loads(payload[header_start:header_end].decode("utf-8"))
+    header["version"] = 1
+    changed_header = json.dumps(header, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
-    key = derive_master_key(password, params, cover_bytes)
-    ciphertext = AESGCM(key).encrypt(nonce, archive_bytes, LEGACY_AAD)
-    return (
-        PAYLOAD_MAGIC + struct.pack(">I", len(header_bytes)) + header_bytes + ciphertext
+    version_1_payload = (
+        PAYLOAD_MAGIC
+        + struct.pack(">I", len(changed_header))
+        + changed_header
+        + payload[header_end:]
     )
 
-
-def _write_legacy_image_vault(
-    cover: Path, output: Path, payload: bytes, password: str
-) -> None:
-    import struct
-
-    from PIL import Image
-
-    from cover_vault.stego import (
-        LEGACY_IMAGE_STEGO_MAGIC,
-        _rgb_channel_indices_rgba,
-        _write_bits_spread,
-        legacy_position_seed,
-    )
-
-    cover_bytes = cover.read_bytes()
-    image = Image.open(cover).convert("RGBA")
-    pixels = bytearray(image.tobytes())
-    indices = _rgb_channel_indices_rgba(pixels)
-    data = LEGACY_IMAGE_STEGO_MAGIC + struct.pack(">Q", len(payload)) + payload
-    _write_bits_spread(
-        pixels,
-        indices,
-        data,
-        legacy_position_seed("image-lsb", cover_bytes, password),
-    )
-    Image.frombytes("RGBA", image.size, bytes(pixels)).save(output, format="PNG")
-
-
-def test_legacy_v1_image_vault_remains_readable(tmp_path: Path) -> None:
-    from cover_vault.archive import make_archive
-
-    source = tmp_path / "source"
-    cover = tmp_path / "cover.png"
-    stego = tmp_path / "legacy.stego.png"
-    restored = tmp_path / "restored"
-    make_source_folder(source)
-    make_png(cover)
-    archive_bytes, _ = make_archive(source)
-    payload = _legacy_v1_payload(archive_bytes, "legacy-password", cover.read_bytes())
-    _write_legacy_image_vault(cover, stego, payload, "legacy-password")
-
-    result = reveal_folder(stego, cover, restored, "legacy-password")
-
-    assert result["mode"] == "image-lsb"
-    assert_restored(restored)
+    with pytest.raises(CoverVaultError, match="Unsupported payload version: 1"):
+        decrypt_payload(version_1_payload, "password", cover_bytes)
 
 
 def test_v2_payload_header_is_authenticated(tmp_path: Path) -> None:
@@ -434,8 +369,8 @@ def test_kdf_bounds_reject_excessive_work_factor() -> None:
         derive_master_key("password", params, b"cover")
 
 
-def test_v2_lsb_placement_rejects_legacy_fast_seed(tmp_path: Path) -> None:
-    from cover_vault.stego import extract_payload_image, legacy_position_seed
+def test_lsb_payload_rejects_an_unrelated_seed(tmp_path: Path) -> None:
+    from cover_vault.stego import extract_payload_image
 
     source = tmp_path / "source"
     cover = tmp_path / "cover.png"
@@ -444,9 +379,31 @@ def test_v2_lsb_placement_rejects_legacy_fast_seed(tmp_path: Path) -> None:
     make_png(cover)
     hide_folder(source, cover, stego, "password", mode="image-lsb")
 
-    old_seed = legacy_position_seed("image-lsb", cover.read_bytes(), "password")
     with pytest.raises(CoverVaultError, match="payload marker"):
-        extract_payload_image(stego, old_seed, use_v2=True)
+        extract_payload_image(stego, b"not-the-derived-placement-key")
+
+
+def test_pdf_cover_rejects_reserved_attachment(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    cover = tmp_path / "reserved.pdf"
+    output = tmp_path / "vault.pdf"
+    make_source_folder(source)
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.add_attachment("cover-vault.cvault", b"already present")
+    with cover.open("wb") as stream:
+        writer.write(stream)
+
+    with pytest.raises(CoverVaultError, match="reserved attachment"):
+        hide_folder(
+            source,
+            cover,
+            output,
+            "password",
+            mode="pdf-attachment",
+            max_usage_ratio=1.0,
+        )
 
 
 def test_invalid_archive_does_not_destroy_existing_destination(tmp_path: Path) -> None:

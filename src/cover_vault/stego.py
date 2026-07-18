@@ -4,23 +4,24 @@ import hashlib
 import hmac
 import io
 import json
+import os
 import struct
 import wave
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from pypdf import PdfReader, PdfWriter
+from pypdf.errors import PyPdfError
+
 from .crypto import KdfParams
 from .errors import CoverVaultError
-from .io_utils import atomic_output_path, atomic_write_bytes
+from .io_utils import atomic_output_path
 
-LEGACY_WAV_STEGO_MAGIC = b"CVWAV2\x00"
-LEGACY_IMAGE_STEGO_MAGIC = b"CVIMG1\x00"
 WAV_STEGO_MAGIC = b"CVWAV3\x00"
 IMAGE_STEGO_MAGIC = b"CVIMG2\x00"
 LSB_BOOTSTRAP_MAGIC = b"CVLSB2\x00"
 MAX_LSB_BOOTSTRAP_BYTES = 4096
-PDF_STEGO_MAGIC = b"CVPDF1\x00"
-PDF_STEGO_FOOTER = b"CVPDFEND1\x00"
+PDF_ATTACHMENT_NAME = "cover-vault.cvault"
 LOSSLESS_IMAGE_OUTPUT_FORMATS = {
     ".png": "PNG",
     ".bmp": "BMP",
@@ -29,25 +30,6 @@ LOSSLESS_IMAGE_OUTPUT_FORMATS = {
 }
 HIGH_USAGE_WARNING_RATIO = 0.10
 DEFAULT_MAX_USAGE_RATIO = 0.25
-
-
-def legacy_position_seed(mode: str, cover_bytes: bytes, password: str) -> bytes:
-    """Version-1 placement seed retained only for reading old vaults."""
-
-    if not password:
-        raise CoverVaultError("Password cannot be empty.")
-    return hashlib.sha256(
-        b"cover-vault:stego-positions:v1\x00"
-        + mode.encode("ascii")
-        + b"\x00"
-        + hashlib.sha256(cover_bytes).digest()
-        + b"\x00"
-        + password.encode("utf-8")
-    ).digest()
-
-
-# Backward-compatible import name. New vault creation never uses this function.
-position_seed = legacy_position_seed
 
 
 def _bytes_to_bits(data: bytes) -> Iterable[int]:
@@ -216,13 +198,13 @@ def _estimated_lsb_bootstrap() -> bytes:
 
 def _read_lsb_bootstrap(
     carrier: bytearray, byte_indices: Sequence[int]
-) -> tuple[KdfParams | None, int]:
+) -> tuple[KdfParams, int]:
     prefix_bytes = len(LSB_BOOTSTRAP_MAGIC) + 4
     if len(byte_indices) < prefix_bytes * 8:
-        return None, 0
+        raise CoverVaultError("No Cover Vault LSB bootstrap found.")
     prefix = _read_bytes_linear(carrier, byte_indices, prefix_bytes)
     if not prefix.startswith(LSB_BOOTSTRAP_MAGIC):
-        return None, 0
+        raise CoverVaultError("No Cover Vault LSB bootstrap found.")
     header_len = struct.unpack(">I", prefix[-4:])[0]
     if header_len <= 0 or header_len > MAX_LSB_BOOTSTRAP_BYTES:
         raise CoverVaultError("LSB bootstrap metadata length is invalid.")
@@ -304,7 +286,7 @@ def embed_payload_wav(
     return describe_usage(len(payload), capacity)
 
 
-def read_wav_kdf_params(stego_file: Path | str) -> KdfParams | None:
+def read_wav_kdf_params(stego_file: Path | str) -> KdfParams:
     stego_bytes = Path(stego_file).expanduser().read_bytes()
     _, sample_width, frames = _read_wav_frames(stego_bytes)
     indices = _sample_low_byte_indices(frames, sample_width)
@@ -312,27 +294,18 @@ def read_wav_kdf_params(stego_file: Path | str) -> KdfParams | None:
     return params
 
 
-def extract_payload_wav(
-    stego_file: Path | str, seed: bytes, *, use_v2: bool = True
-) -> bytes:
+def extract_payload_wav(stego_file: Path | str, seed: bytes) -> bytes:
     stego_bytes = Path(stego_file).expanduser().read_bytes()
     _, sample_width, frames = _read_wav_frames(stego_bytes)
     indices = _sample_low_byte_indices(frames, sample_width)
-    bootstrap_params, bootstrap_bits = _read_lsb_bootstrap(frames, indices)
-    if use_v2:
-        if bootstrap_params is None:
-            raise CoverVaultError("No version-2 Cover Vault WAV bootstrap found.")
-        magic = WAV_STEGO_MAGIC
-        payload_indices = indices[bootstrap_bits:]
-    else:
-        magic = LEGACY_WAV_STEGO_MAGIC
-        payload_indices = indices
+    _, bootstrap_bits = _read_lsb_bootstrap(frames, indices)
+    payload_indices = indices[bootstrap_bits:]
 
-    header_bytes_needed = len(magic) + 8
+    header_bytes_needed = len(WAV_STEGO_MAGIC) + 8
     header = _read_bytes_spread(frames, payload_indices, header_bytes_needed, seed)
-    if not header.startswith(magic):
+    if not header.startswith(WAV_STEGO_MAGIC):
         raise CoverVaultError("No Cover Vault WAV payload marker found.")
-    payload_len = struct.unpack(">Q", header[len(magic) :])[0]
+    payload_len = struct.unpack(">Q", header[len(WAV_STEGO_MAGIC) :])[0]
     if payload_len > (len(payload_indices) // 8) - header_bytes_needed:
         raise CoverVaultError("Stego WAV payload appears truncated.")
     container = _read_bytes_spread(
@@ -435,7 +408,7 @@ def embed_payload_image(
     return describe_usage(len(payload), capacity)
 
 
-def read_image_kdf_params(stego_file: Path | str) -> KdfParams | None:
+def read_image_kdf_params(stego_file: Path | str) -> KdfParams:
     stego_bytes = Path(stego_file).expanduser().read_bytes()
     image = _load_rgba_image(stego_bytes)
     pixel_bytes = bytearray(image.tobytes())
@@ -444,28 +417,19 @@ def read_image_kdf_params(stego_file: Path | str) -> KdfParams | None:
     return params
 
 
-def extract_payload_image(
-    stego_file: Path | str, seed: bytes, *, use_v2: bool = True
-) -> bytes:
+def extract_payload_image(stego_file: Path | str, seed: bytes) -> bytes:
     stego_bytes = Path(stego_file).expanduser().read_bytes()
     image = _load_rgba_image(stego_bytes)
     pixel_bytes = bytearray(image.tobytes())
     indices = _rgb_channel_indices_rgba(pixel_bytes)
-    bootstrap_params, bootstrap_bits = _read_lsb_bootstrap(pixel_bytes, indices)
-    if use_v2:
-        if bootstrap_params is None:
-            raise CoverVaultError("No version-2 Cover Vault image bootstrap found.")
-        magic = IMAGE_STEGO_MAGIC
-        payload_indices = indices[bootstrap_bits:]
-    else:
-        magic = LEGACY_IMAGE_STEGO_MAGIC
-        payload_indices = indices
+    _, bootstrap_bits = _read_lsb_bootstrap(pixel_bytes, indices)
+    payload_indices = indices[bootstrap_bits:]
 
-    header_bytes_needed = len(magic) + 8
+    header_bytes_needed = len(IMAGE_STEGO_MAGIC) + 8
     header = _read_bytes_spread(pixel_bytes, payload_indices, header_bytes_needed, seed)
-    if not header.startswith(magic):
+    if not header.startswith(IMAGE_STEGO_MAGIC):
         raise CoverVaultError("No Cover Vault image payload marker found.")
-    payload_len = struct.unpack(">Q", header[len(magic) :])[0]
+    payload_len = struct.unpack(">Q", header[len(IMAGE_STEGO_MAGIC) :])[0]
     if payload_len > (len(payload_indices) // 8) - header_bytes_needed:
         raise CoverVaultError("Stego image payload appears truncated.")
     container = _read_bytes_spread(
@@ -474,17 +438,32 @@ def extract_payload_image(
     return container[header_bytes_needed:]
 
 
-def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
+def _pdf_reader(pdf_bytes: bytes, *, role: str) -> PdfReader:
     if not pdf_bytes.lstrip().startswith(b"%PDF-"):
-        raise CoverVaultError("PDF mode requires a valid-looking PDF cover file.")
-    if b"%%EOF" not in pdf_bytes[-4096:]:
-        raise CoverVaultError("PDF cover does not contain a final %%EOF marker.")
+        raise CoverVaultError(f"{role} must be a PDF file.")
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
+    except (PyPdfError, OSError, ValueError) as exc:
+        raise CoverVaultError(f"{role} is not a readable PDF file.") from exc
+    if reader.is_encrypted:
+        raise CoverVaultError(
+            f"{role} is encrypted. Password-protected PDF covers are not supported."
+        )
+    return reader
 
 
-def pdf_usage_capacity_bytes_from_bytes(pdf_bytes: bytes) -> int:
-    """Return the reference capacity used for PDF cover-ratio guidance."""
+def pdf_reference_capacity_bytes_from_bytes(pdf_bytes: bytes) -> int:
+    """Return the cover-size reference used for PDF attachment ratio guidance."""
 
-    _validate_pdf_bytes(pdf_bytes)
+    reader = _pdf_reader(pdf_bytes, role="PDF cover")
+    try:
+        has_reserved_attachment = PDF_ATTACHMENT_NAME in reader.attachments
+    except (PyPdfError, OSError, ValueError) as exc:
+        raise CoverVaultError("Could not inspect PDF cover attachments.") from exc
+    if has_reserved_attachment:
+        raise CoverVaultError(
+            f"PDF cover already contains the reserved attachment {PDF_ATTACHMENT_NAME!r}."
+        )
     return len(pdf_bytes)
 
 
@@ -495,39 +474,44 @@ def embed_payload_pdf(
     *,
     max_usage_ratio: float = DEFAULT_MAX_USAGE_RATIO,
 ) -> dict:
-    _validate_pdf_bytes(cover_bytes)
     output_path = Path(output_pdf).expanduser()
     if output_path.suffix.lower() != ".pdf":
         raise CoverVaultError("PDF mode must write an output file ending in .pdf.")
 
-    capacity = pdf_usage_capacity_bytes_from_bytes(cover_bytes)
+    capacity = pdf_reference_capacity_bytes_from_bytes(cover_bytes)
     validate_capacity(
-        mode="pdf-append",
+        mode="pdf-attachment",
         payload_bytes=len(payload),
         capacity_bytes=capacity,
         max_usage_ratio=max_usage_ratio,
     )
-    container = _container(PDF_STEGO_MAGIC, payload)
-    footer = PDF_STEGO_FOOTER + struct.pack(">Q", len(container))
-    atomic_write_bytes(output_path, cover_bytes + b"\n" + container + footer)
+
+    try:
+        writer = PdfWriter(clone_from=io.BytesIO(cover_bytes))
+        writer.add_attachment(PDF_ATTACHMENT_NAME, payload)
+        with atomic_output_path(output_path) as temporary_path:
+            with temporary_path.open("wb") as output:
+                writer.write(output)
+                output.flush()
+                os.fsync(output.fileno())
+    except (PyPdfError, OSError, ValueError) as exc:
+        raise CoverVaultError("Could not create the PDF attachment vault.") from exc
     return describe_usage(len(payload), capacity)
 
 
 def extract_payload_pdf(stego_file: Path | str) -> bytes:
-    data = Path(stego_file).expanduser().read_bytes()
-    footer_len = len(PDF_STEGO_FOOTER) + 8
-    if len(data) < footer_len or data[-footer_len:-8] != PDF_STEGO_FOOTER:
-        raise CoverVaultError("No Cover Vault PDF payload marker found.")
-    container_len = struct.unpack(">Q", data[-8:])[0]
-    start = len(data) - footer_len - container_len
-    if start < 0:
-        raise CoverVaultError("Stego PDF payload appears truncated.")
-    container = data[start : len(data) - footer_len]
-    header_len = len(PDF_STEGO_MAGIC) + 8
-    if len(container) < header_len or not container.startswith(PDF_STEGO_MAGIC):
-        raise CoverVaultError("No Cover Vault PDF payload marker found.")
-    payload_len = struct.unpack(">Q", container[len(PDF_STEGO_MAGIC) : header_len])[0]
-    payload = container[header_len:]
-    if len(payload) != payload_len:
-        raise CoverVaultError("Stego PDF payload appears truncated.")
-    return payload
+    path = Path(stego_file).expanduser()
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise CoverVaultError(f"Could not read PDF vault: {path}") from exc
+    reader = _pdf_reader(data, role="PDF vault")
+    try:
+        attachments = reader.attachments.get(PDF_ATTACHMENT_NAME, [])
+    except (PyPdfError, OSError, ValueError) as exc:
+        raise CoverVaultError("Could not inspect PDF vault attachments.") from exc
+    if len(attachments) != 1:
+        if not attachments:
+            raise CoverVaultError("No Cover Vault PDF attachment found.")
+        raise CoverVaultError("PDF vault contains multiple reserved attachments.")
+    return attachments[0]

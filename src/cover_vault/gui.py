@@ -71,7 +71,7 @@ class CoverVaultApp(tk.Tk):
         )
         ttk.Label(
             root,
-            text="Encrypt a folder into an image, WAV, or PDF cover, or restore an existing vault.",
+            text="Encrypt a folder into an image or WAV carrier, or attach it to a PDF, then restore it later.",
         ).pack(anchor="w", pady=(2, 12))
 
         self.tabs = ttk.Notebook(root)

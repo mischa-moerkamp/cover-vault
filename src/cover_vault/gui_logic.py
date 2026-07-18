@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .archive import DEFAULT_EXCLUDES, GIT_HISTORY_EXCLUDE
 
-MODES = ("auto", "image-lsb", "wav-lsb", "pdf-append")
+MODES = ("auto", "image-lsb", "wav-lsb", "pdf-attachment")
 
 
 def build_excludes(include_git_history: bool, custom_text: str) -> tuple[str, ...]:

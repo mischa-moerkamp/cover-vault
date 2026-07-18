@@ -27,9 +27,8 @@ SCRYPT_N = 2**17
 SCRYPT_R = 8
 SCRYPT_P = 1
 AES_GCM_TAG_BYTES = 16
-LEGACY_AAD = b"cover-vault:encrypted-folder-payload:v1"
 MAX_PAYLOAD_HEADER_BYTES = 64 * 1024
-MIN_SCRYPT_N = 2**14
+MIN_SCRYPT_N = SCRYPT_N
 MAX_SCRYPT_N = 2**20
 MAX_SCRYPT_R = 32
 MAX_SCRYPT_P = 16
@@ -160,12 +159,6 @@ def derive_master_key(password: str, params: KdfParams, cover_bytes: bytes) -> b
     return kdf.derive(password.encode("utf-8"))
 
 
-def derive_key(password: str, params: KdfParams, cover_bytes: bytes) -> bytes:
-    """Backward-compatible alias for callers that used the version-1 API."""
-
-    return derive_master_key(password, params, cover_bytes)
-
-
 def _derive_subkey(master_key: bytes, info: bytes) -> bytes:
     return HKDF(
         algorithm=hashes.SHA256(),
@@ -187,16 +180,14 @@ def derive_placement_seed(master_key: bytes, mode: str, cover_bytes: bytes) -> b
     )
 
 
-def _payload_header(params: KdfParams, nonce: bytes, *, version: int = 2) -> bytes:
+def _payload_header(params: KdfParams, nonce: bytes) -> bytes:
     header: dict[str, Any] = {
-        "version": version,
+        "version": 2,
         "cipher": CIPHER_NAME,
         "kdf": params.to_dict(),
         "nonce": b64e(nonce),
         "archive": "tar.gz",
     }
-    if version == 1:
-        header["aad"] = LEGACY_AAD.decode("ascii")
     header_bytes = json.dumps(header, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -227,7 +218,7 @@ def encrypt_payload_with_context(
     master_key = derive_master_key(password, params, cover_bytes)
     encryption_key = _derive_subkey(master_key, b"cover-vault:payload-encryption:v2")
     nonce = os.urandom(NONCE_BYTES)
-    header_bytes = _payload_header(params, nonce, version=2)
+    header_bytes = _payload_header(params, nonce)
     prefix = _payload_prefix(header_bytes)
     ciphertext = AESGCM(encryption_key).encrypt(nonce, archive_bytes, prefix)
     return EncryptionContext(
@@ -274,7 +265,7 @@ def decrypt_payload(
 ) -> bytes:
     header, _header_bytes, prefix = _parse_payload(payload)
     version = header.get("version")
-    if version not in {1, 2}:
+    if version != 2:
         raise CoverVaultError(f"Unsupported payload version: {version}")
     if header.get("cipher") != CIPHER_NAME:
         raise CoverVaultError(f"Unsupported cipher: {header.get('cipher')}")
@@ -291,14 +282,10 @@ def decrypt_payload(
         raise CoverVaultError("Invalid AES-GCM nonce length in vault metadata.")
 
     resolved_master_key = master_key or derive_master_key(password, params, cover_bytes)
-    if version == 1:
-        encryption_key = resolved_master_key
-        aad = LEGACY_AAD
-    else:
-        encryption_key = _derive_subkey(
-            resolved_master_key, b"cover-vault:payload-encryption:v2"
-        )
-        aad = prefix
+    encryption_key = _derive_subkey(
+        resolved_master_key, b"cover-vault:payload-encryption:v2"
+    )
+    aad = prefix
 
     try:
         return AESGCM(encryption_key).decrypt(nonce, payload[len(prefix) :], aad)

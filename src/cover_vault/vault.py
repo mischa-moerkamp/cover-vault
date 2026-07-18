@@ -26,16 +26,15 @@ from .stego import (
     extract_payload_pdf,
     extract_payload_wav,
     image_capacity_bytes_from_bytes,
-    legacy_position_seed,
-    pdf_usage_capacity_bytes_from_bytes,
+    pdf_reference_capacity_bytes_from_bytes,
     read_image_kdf_params,
     read_wav_kdf_params,
     validate_capacity,
     wav_capacity_bytes_from_bytes,
 )
 
-CarrierMode = Literal["auto", "wav-lsb", "image-lsb", "pdf-append"]
-RevealMode = Literal["wav-lsb", "image-lsb", "pdf-append", "auto"]
+CarrierMode = Literal["auto", "wav-lsb", "image-lsb", "pdf-attachment"]
+RevealMode = Literal["wav-lsb", "image-lsb", "pdf-attachment", "auto"]
 
 
 def _try_capacity(mode: str, cover_bytes: bytes) -> int | None:
@@ -44,8 +43,8 @@ def _try_capacity(mode: str, cover_bytes: bytes) -> int | None:
             return wav_capacity_bytes_from_bytes(cover_bytes)
         if mode == "image-lsb":
             return image_capacity_bytes_from_bytes(cover_bytes)
-        if mode == "pdf-append":
-            return pdf_usage_capacity_bytes_from_bytes(cover_bytes)
+        if mode == "pdf-attachment":
+            return pdf_reference_capacity_bytes_from_bytes(cover_bytes)
     except CoverVaultError:
         return None
     return None
@@ -53,29 +52,28 @@ def _try_capacity(mode: str, cover_bytes: bytes) -> int | None:
 
 def _detect_hide_mode(cover_bytes: bytes, requested: CarrierMode) -> str:
     if requested != "auto":
-        capacity = _try_capacity(requested, cover_bytes)
-        if capacity is None:
-            raise CoverVaultError(
-                f"Cover file is not compatible with {requested} mode."
-            )
+        _capacity_for_mode(requested, cover_bytes)
         return requested
 
     if _try_capacity("wav-lsb", cover_bytes) is not None:
         return "wav-lsb"
     if _try_capacity("image-lsb", cover_bytes) is not None:
         return "image-lsb"
-    if _try_capacity("pdf-append", cover_bytes) is not None:
-        return "pdf-append"
+    if _try_capacity("pdf-attachment", cover_bytes) is not None:
+        return "pdf-attachment"
     raise CoverVaultError(
         "Could not identify a supported cover type. Use an uncompressed PCM WAV, a lossless image readable by Pillow, or a PDF."
     )
 
 
 def _capacity_for_mode(mode: str, cover_bytes: bytes) -> int:
-    capacity = _try_capacity(mode, cover_bytes)
-    if capacity is None:
-        raise CoverVaultError(f"Cover file is not compatible with {mode} mode.")
-    return capacity
+    if mode == "wav-lsb":
+        return wav_capacity_bytes_from_bytes(cover_bytes)
+    if mode == "image-lsb":
+        return image_capacity_bytes_from_bytes(cover_bytes)
+    if mode == "pdf-attachment":
+        return pdf_reference_capacity_bytes_from_bytes(cover_bytes)
+    raise CoverVaultError(f"Unsupported carrier mode: {mode}")
 
 
 def _usage_result(payload_bytes: int, capacity_bytes: int) -> dict:
@@ -132,7 +130,7 @@ def hide_folder(
             kdf_params=encrypted.kdf_params,
             max_usage_ratio=max_usage_ratio,
         )
-    elif detected_mode == "pdf-append":
+    elif detected_mode == "pdf-attachment":
         usage = embed_payload_pdf(
             cover_bytes,
             output_file,
@@ -163,7 +161,7 @@ def _extract_lsb_payload(
     *,
     cover_bytes: bytes,
     password: str,
-) -> tuple[bytes, bytes | None, KdfParams | None]:
+) -> tuple[bytes, bytes, KdfParams]:
     if mode == "wav-lsb":
         params = read_wav_kdf_params(stego_file)
         extractor = extract_payload_wav
@@ -171,13 +169,9 @@ def _extract_lsb_payload(
         params = read_image_kdf_params(stego_file)
         extractor = extract_payload_image
 
-    if params is None:
-        seed = legacy_position_seed(mode, cover_bytes, password)
-        return extractor(stego_file, seed, use_v2=False), None, None
-
     master_key = derive_master_key(password, params, cover_bytes)
     seed = derive_placement_seed(master_key, mode, cover_bytes)
-    return extractor(stego_file, seed, use_v2=True), master_key, params
+    return extractor(stego_file, seed), master_key, params
 
 
 def _extract_payload(
@@ -197,11 +191,11 @@ def _extract_payload(
             stego_file, "image-lsb", cover_bytes=cover_bytes, password=password
         )
         return payload, "image-lsb", master_key, params
-    if mode == "pdf-append":
-        return extract_payload_pdf(stego_file), "pdf-append", None, None
+    if mode == "pdf-attachment":
+        return extract_payload_pdf(stego_file), "pdf-attachment", None, None
     if mode == "auto":
         errors: list[str] = []
-        for candidate in ("wav-lsb", "image-lsb", "pdf-append"):
+        for candidate in ("wav-lsb", "image-lsb", "pdf-attachment"):
             try:
                 return _extract_payload(
                     stego_file,
@@ -263,7 +257,7 @@ def cover_info(cover_source: Path | str) -> dict:
         "supported_modes": [],
         "capacities": {},
     }
-    for mode in ("wav-lsb", "image-lsb", "pdf-append"):
+    for mode in ("wav-lsb", "image-lsb", "pdf-attachment"):
         capacity = _try_capacity(mode, cover_bytes)
         if capacity is not None:
             result["supported_modes"].append(mode)
