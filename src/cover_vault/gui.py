@@ -6,7 +6,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .errors import CoverVaultError
 from .gui_logic import MODES, build_excludes, capacity_summary, suggested_output_path
 from .progress import ProgressEvent
 from .stego import DEFAULT_MAX_USAGE_RATIO
@@ -36,26 +35,30 @@ class CoverVaultApp(tk.Tk):
         try:
             if ImageTk is None:
                 return
-            
+
             # Try multiple possible paths
             possible_paths = [
-                Path(__file__).parent.parent.parent / "assets" / "cover-vault.png",  # Development
-                Path(__file__).parent / "assets" / "cover-vault.png",  # Installed package
+                Path(__file__).parent.parent.parent
+                / "assets"
+                / "cover-vault.png",  # Development
+                Path(__file__).parent
+                / "assets"
+                / "cover-vault.png",  # Installed package
             ]
-            
+
             icon_path = None
             for path in possible_paths:
                 if path.exists():
                     icon_path = path
                     break
-            
+
             if icon_path is None:
                 return
-            
+
             icon_image = Image.open(icon_path)
             self._icon_photo = ImageTk.PhotoImage(icon_image)
             self.iconphoto(False, self._icon_photo)
-            
+
         except Exception:
             # Silently fail if icon loading fails
             pass
@@ -63,8 +66,13 @@ class CoverVaultApp(tk.Tk):
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=14)
         root.pack(fill="both", expand=True)
-        ttk.Label(root, text="Cover Vault", font=("TkDefaultFont", 18, "bold")).pack(anchor="w")
-        ttk.Label(root, text="Encrypt a folder into an image, WAV, or PDF cover, or restore an existing vault.").pack(anchor="w", pady=(2, 12))
+        ttk.Label(root, text="Cover Vault", font=("TkDefaultFont", 18, "bold")).pack(
+            anchor="w"
+        )
+        ttk.Label(
+            root,
+            text="Encrypt a folder into an image, WAV, or PDF cover, or restore an existing vault.",
+        ).pack(anchor="w", pady=(2, 12))
 
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill="both", expand=True)
@@ -82,10 +90,24 @@ class CoverVaultApp(tk.Tk):
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(status, textvariable=self.status_var).pack(anchor="w", pady=(4, 0))
 
-    def _row(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, command, button: str) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
-        ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=5)
-        ttk.Button(parent, text=button, command=command).grid(row=row, column=2, padx=(8, 0), pady=5)
+    def _row(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+        command,
+        button: str,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=5
+        )
+        ttk.Entry(parent, textvariable=variable).grid(
+            row=row, column=1, sticky="ew", pady=5
+        )
+        ttk.Button(parent, text=button, command=command).grid(
+            row=row, column=2, padx=(8, 0), pady=5
+        )
 
     def _build_hide_tab(self) -> None:
         f = self.hide_tab
@@ -99,34 +121,64 @@ class CoverVaultApp(tk.Tk):
         self.ratio_var = tk.DoubleVar(value=DEFAULT_MAX_USAGE_RATIO)
         self.git_var = tk.BooleanVar(value=False)
         self.custom_excludes_var = tk.StringVar()
-        self.plan_var = tk.StringVar(value="Select a source folder and cover, then preview capacity.")
+        self.plan_var = tk.StringVar(
+            value="Select a source folder and cover, then preview capacity."
+        )
 
-        self._row(f, 0, "Folder", self.source_var, lambda: self._pick_directory(self.source_var), "Browse…")
+        self._row(
+            f,
+            0,
+            "Folder",
+            self.source_var,
+            lambda: self._pick_directory(self.source_var),
+            "Browse…",
+        )
         self._row(f, 1, "Cover file", self.cover_var, self._pick_cover, "Browse…")
         self._row(f, 2, "Output file", self.output_var, self._pick_output, "Save as…")
         ttk.Label(f, text="Password").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(f, textvariable=self.hide_password_var, show="•").grid(row=3, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Entry(f, textvariable=self.hide_password_var, show="•").grid(
+            row=3, column=1, columnspan=2, sticky="ew", pady=5
+        )
         ttk.Label(f, text="Confirm").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(f, textvariable=self.confirm_var, show="•").grid(row=4, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Entry(f, textvariable=self.confirm_var, show="•").grid(
+            row=4, column=1, columnspan=2, sticky="ew", pady=5
+        )
         ttk.Label(f, text="Carrier mode").grid(row=5, column=0, sticky="w", pady=5)
-        ttk.Combobox(f, textvariable=self.hide_mode_var, values=MODES, state="readonly").grid(row=5, column=1, sticky="w", pady=5)
+        ttk.Combobox(
+            f, textvariable=self.hide_mode_var, values=MODES, state="readonly"
+        ).grid(row=5, column=1, sticky="w", pady=5)
         ttk.Label(f, text="Maximum usage").grid(row=6, column=0, sticky="w", pady=5)
         ratio = ttk.Frame(f)
         ratio.grid(row=6, column=1, columnspan=2, sticky="ew")
-        ttk.Scale(ratio, from_=0.05, to=1.0, variable=self.ratio_var).pack(side="left", fill="x", expand=True)
+        ttk.Scale(ratio, from_=0.05, to=1.0, variable=self.ratio_var).pack(
+            side="left", fill="x", expand=True
+        )
         self.ratio_label = ttk.Label(ratio, width=8)
         self.ratio_label.pack(side="left", padx=(8, 0))
-        self.ratio_var.trace_add("write", lambda *_: self.ratio_label.configure(text=f"{self.ratio_var.get():.0%}"))
+        self.ratio_var.trace_add(
+            "write",
+            lambda *_: self.ratio_label.configure(text=f"{self.ratio_var.get():.0%}"),
+        )
         self.ratio_label.configure(text=f"{self.ratio_var.get():.0%}")
-        ttk.Checkbutton(f, text="Include Git commit history (.git)", variable=self.git_var).grid(row=7, column=1, columnspan=2, sticky="w", pady=5)
+        ttk.Checkbutton(
+            f, text="Include Git commit history (.git)", variable=self.git_var
+        ).grid(row=7, column=1, columnspan=2, sticky="w", pady=5)
         ttk.Label(f, text="Extra excludes").grid(row=8, column=0, sticky="w", pady=5)
-        ttk.Entry(f, textvariable=self.custom_excludes_var).grid(row=8, column=1, columnspan=2, sticky="ew", pady=5)
-        ttk.Label(f, text="Comma-separated names, for example node_modules, dist, .venv").grid(row=9, column=1, columnspan=2, sticky="w")
+        ttk.Entry(f, textvariable=self.custom_excludes_var).grid(
+            row=8, column=1, columnspan=2, sticky="ew", pady=5
+        )
+        ttk.Label(
+            f, text="Comma-separated names, for example node_modules, dist, .venv"
+        ).grid(row=9, column=1, columnspan=2, sticky="w")
         ttk.Separator(f).grid(row=10, column=0, columnspan=3, sticky="ew", pady=12)
-        ttk.Label(f, textvariable=self.plan_var, wraplength=680).grid(row=11, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        ttk.Label(f, textvariable=self.plan_var, wraplength=680).grid(
+            row=11, column=0, columnspan=3, sticky="w", pady=(0, 10)
+        )
         actions = ttk.Frame(f)
         actions.grid(row=12, column=0, columnspan=3, sticky="e")
-        self.preview_button = ttk.Button(actions, text="Preview capacity", command=self._preview)
+        self.preview_button = ttk.Button(
+            actions, text="Preview capacity", command=self._preview
+        )
         self.preview_button.pack(side="left", padx=(0, 8))
         self.hide_button = ttk.Button(actions, text="Create vault", command=self._hide)
         self.hide_button.pack(side="left")
@@ -140,14 +192,41 @@ class CoverVaultApp(tk.Tk):
         self.reveal_password_var = tk.StringVar()
         self.reveal_mode_var = tk.StringVar(value="auto")
         self.overwrite_var = tk.BooleanVar(value=False)
-        self._row(f, 0, "Vault file", self.stego_var, lambda: self._pick_file(self.stego_var), "Browse…")
-        self._row(f, 1, "Original cover", self.original_var, lambda: self._pick_file(self.original_var), "Browse…")
-        self._row(f, 2, "Destination", self.destination_var, lambda: self._pick_directory(self.destination_var), "Browse…")
+        self._row(
+            f,
+            0,
+            "Vault file",
+            self.stego_var,
+            lambda: self._pick_file(self.stego_var),
+            "Browse…",
+        )
+        self._row(
+            f,
+            1,
+            "Original cover",
+            self.original_var,
+            lambda: self._pick_file(self.original_var),
+            "Browse…",
+        )
+        self._row(
+            f,
+            2,
+            "Destination",
+            self.destination_var,
+            lambda: self._pick_directory(self.destination_var),
+            "Browse…",
+        )
         ttk.Label(f, text="Password").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(f, textvariable=self.reveal_password_var, show="•").grid(row=3, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Entry(f, textvariable=self.reveal_password_var, show="•").grid(
+            row=3, column=1, columnspan=2, sticky="ew", pady=5
+        )
         ttk.Label(f, text="Carrier mode").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Combobox(f, textvariable=self.reveal_mode_var, values=MODES, state="readonly").grid(row=4, column=1, sticky="w", pady=5)
-        ttk.Checkbutton(f, text="Overwrite destination if it exists", variable=self.overwrite_var).grid(row=5, column=1, columnspan=2, sticky="w", pady=5)
+        ttk.Combobox(
+            f, textvariable=self.reveal_mode_var, values=MODES, state="readonly"
+        ).grid(row=4, column=1, sticky="w", pady=5)
+        ttk.Checkbutton(
+            f, text="Overwrite destination if it exists", variable=self.overwrite_var
+        ).grid(row=5, column=1, columnspan=2, sticky="w", pady=5)
         self.reveal_button = ttk.Button(f, text="Restore folder", command=self._reveal)
         self.reveal_button.grid(row=6, column=2, sticky="e", pady=(18, 0))
 
@@ -157,7 +236,12 @@ class CoverVaultApp(tk.Tk):
             variable.set(value)
 
     def _pick_file(self, variable: tk.StringVar) -> None:
-        value = filedialog.askopenfilename(filetypes=[("Supported covers", "*.png *.bmp *.tif *.tiff *.wav *.pdf"), ("All files", "*.*")])
+        value = filedialog.askopenfilename(
+            filetypes=[
+                ("Supported covers", "*.png *.bmp *.tif *.tiff *.wav *.pdf"),
+                ("All files", "*.*"),
+            ]
+        )
         if value:
             variable.set(value)
 
@@ -168,7 +252,10 @@ class CoverVaultApp(tk.Tk):
 
     def _pick_output(self) -> None:
         cover = Path(self.cover_var.get()) if self.cover_var.get() else None
-        value = filedialog.asksaveasfilename(defaultextension=cover.suffix if cover else "", initialfile=Path(suggested_output_path(str(cover))).name if cover else "")
+        value = filedialog.asksaveasfilename(
+            defaultextension=cover.suffix if cover else "",
+            initialfile=Path(suggested_output_path(str(cover))).name if cover else "",
+        )
         if value:
             self.output_var.set(value)
 
@@ -183,12 +270,14 @@ class CoverVaultApp(tk.Tk):
             return
         self._set_busy(True)
         self.progress["value"] = 0
+
         def worker() -> None:
             try:
                 result = operation()
                 self._events.put(("success", result))
             except Exception as exc:
                 self._events.put(("error", exc))
+
         threading.Thread(target=worker, daemon=True).start()
 
     def _progress_callback(self, event: ProgressEvent) -> None:
@@ -196,27 +285,89 @@ class CoverVaultApp(tk.Tk):
 
     def _preview(self) -> None:
         if not self.source_var.get() or not self.cover_var.get():
-            messagebox.showerror("Missing information", "Select both a source folder and cover file.")
+            messagebox.showerror(
+                "Missing information", "Select both a source folder and cover file."
+            )
             return
         excludes = build_excludes(self.git_var.get(), self.custom_excludes_var.get())
         self.status_var.set("Calculating capacity…")
-        self._run(lambda: ("plan", plan_folder(self.source_var.get(), self.cover_var.get(), mode=self.hide_mode_var.get(), excludes=excludes, max_usage_ratio=self.ratio_var.get())))
+        self._run(
+            lambda: (
+                "plan",
+                plan_folder(
+                    self.source_var.get(),
+                    self.cover_var.get(),
+                    mode=self.hide_mode_var.get(),
+                    excludes=excludes,
+                    max_usage_ratio=self.ratio_var.get(),
+                ),
+            )
+        )
 
     def _hide(self) -> None:
-        if not all((self.source_var.get(), self.cover_var.get(), self.output_var.get(), self.hide_password_var.get())):
-            messagebox.showerror("Missing information", "Complete the folder, cover, output, and password fields.")
+        if not all(
+            (
+                self.source_var.get(),
+                self.cover_var.get(),
+                self.output_var.get(),
+                self.hide_password_var.get(),
+            )
+        ):
+            messagebox.showerror(
+                "Missing information",
+                "Complete the folder, cover, output, and password fields.",
+            )
             return
         if self.hide_password_var.get() != self.confirm_var.get():
-            messagebox.showerror("Password mismatch", "The password fields do not match.")
+            messagebox.showerror(
+                "Password mismatch", "The password fields do not match."
+            )
             return
         excludes = build_excludes(self.git_var.get(), self.custom_excludes_var.get())
-        self._run(lambda: ("hide", hide_folder(self.source_var.get(), self.cover_var.get(), self.output_var.get(), self.hide_password_var.get(), mode=self.hide_mode_var.get(), excludes=excludes, max_usage_ratio=self.ratio_var.get(), progress=self._progress_callback)))
+        self._run(
+            lambda: (
+                "hide",
+                hide_folder(
+                    self.source_var.get(),
+                    self.cover_var.get(),
+                    self.output_var.get(),
+                    self.hide_password_var.get(),
+                    mode=self.hide_mode_var.get(),
+                    excludes=excludes,
+                    max_usage_ratio=self.ratio_var.get(),
+                    progress=self._progress_callback,
+                ),
+            )
+        )
 
     def _reveal(self) -> None:
-        if not all((self.stego_var.get(), self.original_var.get(), self.destination_var.get(), self.reveal_password_var.get())):
-            messagebox.showerror("Missing information", "Complete the vault, original cover, destination, and password fields.")
+        if not all(
+            (
+                self.stego_var.get(),
+                self.original_var.get(),
+                self.destination_var.get(),
+                self.reveal_password_var.get(),
+            )
+        ):
+            messagebox.showerror(
+                "Missing information",
+                "Complete the vault, original cover, destination, and password fields.",
+            )
             return
-        self._run(lambda: ("reveal", reveal_folder(self.stego_var.get(), self.original_var.get(), self.destination_var.get(), self.reveal_password_var.get(), mode=self.reveal_mode_var.get(), overwrite=self.overwrite_var.get(), progress=self._progress_callback)))
+        self._run(
+            lambda: (
+                "reveal",
+                reveal_folder(
+                    self.stego_var.get(),
+                    self.original_var.get(),
+                    self.destination_var.get(),
+                    self.reveal_password_var.get(),
+                    mode=self.reveal_mode_var.get(),
+                    overwrite=self.overwrite_var.get(),
+                    progress=self._progress_callback,
+                ),
+            )
+        )
 
     def _drain_events(self) -> None:
         try:
@@ -234,18 +385,31 @@ class CoverVaultApp(tk.Tk):
                     self._set_busy(False)
                     operation, result = payload
                     if operation == "plan":
-                        self.plan_var.set(capacity_summary(result) + (f"\n{result['advisory']}" if result.get("advisory") else ""))
+                        self.plan_var.set(
+                            capacity_summary(result)
+                            + (
+                                f"\n{result['advisory']}"
+                                if result.get("advisory")
+                                else ""
+                            )
+                        )
                         self.progress["value"] = 100
                         self.status_var.set("Capacity preview complete")
                     elif operation == "hide":
                         self.hide_password_var.set("")
                         self.confirm_var.set("")
                         self.status_var.set("Vault created")
-                        messagebox.showinfo("Cover Vault", f"Vault created successfully.\n\n{result['output']}\nMode: {result['mode']}\nFiles: {result['files_encrypted']}\nUsage: {result['usage_percent']:.2f}%")
+                        messagebox.showinfo(
+                            "Cover Vault",
+                            f"Vault created successfully.\n\n{result['output']}\nMode: {result['mode']}\nFiles: {result['files_encrypted']}\nUsage: {result['usage_percent']:.2f}%",
+                        )
                     else:
                         self.reveal_password_var.set("")
                         self.status_var.set("Folder restored")
-                        messagebox.showinfo("Cover Vault", f"Folder restored successfully.\n\n{result['destination']}\nFiles: {result['files_decrypted']}")
+                        messagebox.showinfo(
+                            "Cover Vault",
+                            f"Folder restored successfully.\n\n{result['destination']}\nFiles: {result['files_decrypted']}",
+                        )
         except queue.Empty:
             pass
         self.after(100, self._drain_events)

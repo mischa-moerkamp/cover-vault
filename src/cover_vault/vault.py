@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Literal
 
 from .archive import DEFAULT_EXCLUDES, extract_archive, make_archive
 from .cover import read_cover
 from .crypto import (
+    KdfParams,
     cover_hash_hex,
     decrypt_payload,
-    encrypt_payload,
+    derive_master_key,
+    derive_placement_seed,
+    encrypt_payload_with_context,
     encrypted_payload_size_for_plaintext,
 )
 from .errors import CoverVaultError
@@ -16,14 +20,16 @@ from .progress import ProgressCallback, report
 from .stego import (
     DEFAULT_MAX_USAGE_RATIO,
     embed_payload_image,
+    embed_payload_pdf,
     embed_payload_wav,
     extract_payload_image,
+    extract_payload_pdf,
     extract_payload_wav,
     image_capacity_bytes_from_bytes,
+    legacy_position_seed,
     pdf_usage_capacity_bytes_from_bytes,
-    position_seed,
-    embed_payload_pdf,
-    extract_payload_pdf,
+    read_image_kdf_params,
+    read_wav_kdf_params,
     validate_capacity,
     wav_capacity_bytes_from_bytes,
 )
@@ -54,8 +60,6 @@ def _detect_hide_mode(cover_bytes: bytes, requested: CarrierMode) -> str:
             )
         return requested
 
-    # Prefer WAV when both parsers happen to accept the file because WAV output
-    # preserves the same media family. Otherwise use lossless image LSB.
     if _try_capacity("wav-lsb", cover_bytes) is not None:
         return "wav-lsb"
     if _try_capacity("image-lsb", cover_bytes) is not None:
@@ -103,39 +107,48 @@ def hide_folder(
     report(progress, 0.12, f"Creating archive ({detected_mode})")
     archive_bytes, files_added = make_archive(source_folder, excludes=excludes)
     report(progress, 0.42, "Encrypting archive")
-    payload = encrypt_payload(archive_bytes, password=password, cover_bytes=cover_bytes)
-    seed = position_seed(detected_mode, cover_bytes, password)
+    encrypted = encrypt_payload_with_context(
+        archive_bytes, password=password, cover_bytes=cover_bytes
+    )
     report(progress, 0.66, "Embedding encrypted payload")
 
     if detected_mode == "wav-lsb":
+        seed = derive_placement_seed(encrypted.master_key, detected_mode, cover_bytes)
         usage = embed_payload_wav(
             cover_bytes,
             output_file,
-            payload,
+            encrypted.payload,
             seed,
+            kdf_params=encrypted.kdf_params,
             max_usage_ratio=max_usage_ratio,
         )
     elif detected_mode == "image-lsb":
+        seed = derive_placement_seed(encrypted.master_key, detected_mode, cover_bytes)
         usage = embed_payload_image(
             cover_bytes,
             output_file,
-            payload,
+            encrypted.payload,
             seed,
+            kdf_params=encrypted.kdf_params,
             max_usage_ratio=max_usage_ratio,
         )
     elif detected_mode == "pdf-append":
         usage = embed_payload_pdf(
-            cover_bytes, output_file, payload, max_usage_ratio=max_usage_ratio
+            cover_bytes,
+            output_file,
+            encrypted.payload,
+            max_usage_ratio=max_usage_ratio,
         )
     else:  # pragma: no cover - guarded by mode detection
         raise CoverVaultError(f"Unsupported carrier mode: {detected_mode}")
 
     report(progress, 1.0, "Vault created")
     return {
+        "format_version": 2,
         "mode": detected_mode,
         "output": str(Path(output_file).expanduser()),
         "files_encrypted": files_added,
-        "payload_bytes": len(payload),
+        "payload_bytes": len(encrypted.payload),
         "capacity_bytes": usage["capacity_bytes"],
         "usage_ratio": usage["usage_ratio"],
         "usage_percent": usage["usage_percent"],
@@ -144,28 +157,58 @@ def hide_folder(
     }
 
 
+def _extract_lsb_payload(
+    stego_file: Path | str,
+    mode: Literal["wav-lsb", "image-lsb"],
+    *,
+    cover_bytes: bytes,
+    password: str,
+) -> tuple[bytes, bytes | None, KdfParams | None]:
+    if mode == "wav-lsb":
+        params = read_wav_kdf_params(stego_file)
+        extractor = extract_payload_wav
+    else:
+        params = read_image_kdf_params(stego_file)
+        extractor = extract_payload_image
+
+    if params is None:
+        seed = legacy_position_seed(mode, cover_bytes, password)
+        return extractor(stego_file, seed, use_v2=False), None, None
+
+    master_key = derive_master_key(password, params, cover_bytes)
+    seed = derive_placement_seed(master_key, mode, cover_bytes)
+    return extractor(stego_file, seed, use_v2=True), master_key, params
+
+
 def _extract_payload(
     stego_file: Path | str,
     mode: RevealMode,
     *,
     cover_bytes: bytes,
     password: str,
-) -> tuple[bytes, str]:
+) -> tuple[bytes, str, bytes | None, KdfParams | None]:
     if mode == "wav-lsb":
-        seed = position_seed("wav-lsb", cover_bytes, password)
-        return extract_payload_wav(stego_file, seed), "wav-lsb"
+        payload, master_key, params = _extract_lsb_payload(
+            stego_file, "wav-lsb", cover_bytes=cover_bytes, password=password
+        )
+        return payload, "wav-lsb", master_key, params
     if mode == "image-lsb":
-        seed = position_seed("image-lsb", cover_bytes, password)
-        return extract_payload_image(stego_file, seed), "image-lsb"
+        payload, master_key, params = _extract_lsb_payload(
+            stego_file, "image-lsb", cover_bytes=cover_bytes, password=password
+        )
+        return payload, "image-lsb", master_key, params
     if mode == "pdf-append":
-        return extract_payload_pdf(stego_file), "pdf-append"
+        return extract_payload_pdf(stego_file), "pdf-append", None, None
     if mode == "auto":
         errors: list[str] = []
         for candidate in ("wav-lsb", "image-lsb", "pdf-append"):
             try:
                 return _extract_payload(
-                    stego_file, candidate, cover_bytes=cover_bytes, password=password
-                )  # type: ignore[arg-type]
+                    stego_file,
+                    candidate,  # type: ignore[arg-type]
+                    cover_bytes=cover_bytes,
+                    password=password,
+                )
             except CoverVaultError as exc:
                 errors.append(f"{candidate}: {exc}")
         raise CoverVaultError(
@@ -188,11 +231,17 @@ def reveal_folder(
     report(progress, 0.02, "Reading original cover")
     cover_bytes = read_cover(cover_source)
     report(progress, 0.18, "Extracting encrypted payload")
-    payload, detected_mode = _extract_payload(
+    payload, detected_mode, master_key, kdf_params = _extract_payload(
         stego_file, mode, cover_bytes=cover_bytes, password=password
     )
     report(progress, 0.50, "Decrypting archive")
-    archive_bytes = decrypt_payload(payload, password=password, cover_bytes=cover_bytes)
+    archive_bytes = decrypt_payload(
+        payload,
+        password=password,
+        cover_bytes=cover_bytes,
+        master_key=master_key,
+        expected_kdf_params=kdf_params,
+    )
     report(progress, 0.76, "Restoring files")
     files_written = extract_archive(
         archive_bytes, destination_folder, overwrite=overwrite
@@ -240,8 +289,6 @@ def plan_folder(
     fits_capacity = estimated_payload_bytes <= capacity_bytes
     fits_ratio = fits_capacity and usage["usage_ratio"] <= max_usage_ratio
 
-    # Reuse the same validation message logic when the plan does not fit, but
-    # keep plan_folder non-throwing so it can be used as advisory output.
     advisory: str | None = None
     try:
         validate_capacity(
@@ -254,6 +301,7 @@ def plan_folder(
         advisory = str(exc)
 
     return {
+        "format_version": 2,
         "mode": detected_mode,
         "files_to_encrypt": files_added,
         "archive_bytes": len(archive_bytes),

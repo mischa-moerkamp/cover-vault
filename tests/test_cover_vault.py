@@ -58,7 +58,6 @@ def make_png(path: Path, size: tuple[int, int] = (180, 180)) -> None:
     image.save(path, format="PNG")
 
 
-
 def make_pdf(path: Path, filler_bytes: int = 20_000) -> None:
     # Minimal one-page PDF followed by a large comment block. PDF readers ignore
     # comments, making this a deterministic, dependency-free test cover.
@@ -67,11 +66,14 @@ def make_pdf(path: Path, filler_bytes: int = 20_000) -> None:
         b"1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\n"
         b"2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj\n"
         b"3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>endobj\n"
-        + b"%" + (b" cover-vault-test" * (filler_bytes // 17 + 1))[:filler_bytes] + b"\n"
+        + b"%"
+        + (b" cover-vault-test" * (filler_bytes // 17 + 1))[:filler_bytes]
+        + b"\n"
         b"xref\n0 4\n0000000000 65535 f \n"
         b"trailer<< /Root 1 0 R /Size 4 >>\nstartxref\n0\n%%EOF\n"
     )
     path.write_bytes(body)
+
 
 def assert_restored(restored: Path) -> None:
     assert (restored / "main.py").read_text(encoding="utf-8") == "print('hello')\n"
@@ -145,9 +147,7 @@ def test_image_lsb_roundtrip_can_include_git_history(tmp_path: Path) -> None:
     restored = tmp_path / "restored"
     make_source_folder(source)
     make_png(cover)
-    excludes = tuple(
-        name for name in DEFAULT_EXCLUDES if name != GIT_HISTORY_EXCLUDE
-    )
+    excludes = tuple(name for name in DEFAULT_EXCLUDES if name != GIT_HISTORY_EXCLUDE)
 
     result = hide_folder(
         source, cover, stego, "password", mode="image-lsb", excludes=excludes
@@ -267,10 +267,19 @@ def test_progress_callbacks_for_pdf_round_trip(tmp_path):
     hide_events = []
     reveal_events = []
 
-    hide_folder(source, cover, stego, "password", max_usage_ratio=1.0, progress=hide_events.append)
+    hide_folder(
+        source,
+        cover,
+        stego,
+        "password",
+        max_usage_ratio=1.0,
+        progress=hide_events.append,
+    )
     reveal_folder(stego, cover, restored, "password", progress=reveal_events.append)
 
-    assert all(isinstance(event, ProgressEvent) for event in hide_events + reveal_events)
+    assert all(
+        isinstance(event, ProgressEvent) for event in hide_events + reveal_events
+    )
     assert hide_events[0].fraction > 0
     assert hide_events[-1].fraction == 1.0
     assert reveal_events[-1].fraction == 1.0
@@ -283,4 +292,182 @@ def test_gui_logic_helpers(tmp_path):
     excludes = build_excludes(True, "node_modules, dist; .venv")
     assert ".git" not in excludes
     assert {"node_modules", "dist", ".venv"}.issubset(set(excludes))
-    assert suggested_output_path(str(tmp_path / "photo.png")).endswith("photo.vault.png")
+    assert suggested_output_path(str(tmp_path / "photo.png")).endswith(
+        "photo.vault.png"
+    )
+
+
+def _legacy_v1_payload(
+    archive_bytes: bytes, password: str, cover_bytes: bytes
+) -> bytes:
+    import base64
+    import json
+    import os
+    import struct
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from cover_vault.crypto import (
+        CIPHER_NAME,
+        KDF_NAME,
+        LEGACY_AAD,
+        PAYLOAD_MAGIC,
+        KdfParams,
+        derive_master_key,
+    )
+
+    params = KdfParams(
+        name=KDF_NAME,
+        salt=base64.urlsafe_b64encode(os.urandom(16)).decode("ascii"),
+        n=2**15,
+        r=8,
+        p=1,
+        length=32,
+    )
+    nonce = os.urandom(12)
+    header = {
+        "version": 1,
+        "cipher": CIPHER_NAME,
+        "kdf": params.to_dict(),
+        "nonce": base64.urlsafe_b64encode(nonce).decode("ascii"),
+        "archive": "tar.gz",
+        "aad": LEGACY_AAD.decode("ascii"),
+    }
+    header_bytes = json.dumps(header, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    key = derive_master_key(password, params, cover_bytes)
+    ciphertext = AESGCM(key).encrypt(nonce, archive_bytes, LEGACY_AAD)
+    return (
+        PAYLOAD_MAGIC + struct.pack(">I", len(header_bytes)) + header_bytes + ciphertext
+    )
+
+
+def _write_legacy_image_vault(
+    cover: Path, output: Path, payload: bytes, password: str
+) -> None:
+    import struct
+
+    from PIL import Image
+
+    from cover_vault.stego import (
+        LEGACY_IMAGE_STEGO_MAGIC,
+        _rgb_channel_indices_rgba,
+        _write_bits_spread,
+        legacy_position_seed,
+    )
+
+    cover_bytes = cover.read_bytes()
+    image = Image.open(cover).convert("RGBA")
+    pixels = bytearray(image.tobytes())
+    indices = _rgb_channel_indices_rgba(pixels)
+    data = LEGACY_IMAGE_STEGO_MAGIC + struct.pack(">Q", len(payload)) + payload
+    _write_bits_spread(
+        pixels,
+        indices,
+        data,
+        legacy_position_seed("image-lsb", cover_bytes, password),
+    )
+    Image.frombytes("RGBA", image.size, bytes(pixels)).save(output, format="PNG")
+
+
+def test_legacy_v1_image_vault_remains_readable(tmp_path: Path) -> None:
+    from cover_vault.archive import make_archive
+
+    source = tmp_path / "source"
+    cover = tmp_path / "cover.png"
+    stego = tmp_path / "legacy.stego.png"
+    restored = tmp_path / "restored"
+    make_source_folder(source)
+    make_png(cover)
+    archive_bytes, _ = make_archive(source)
+    payload = _legacy_v1_payload(archive_bytes, "legacy-password", cover.read_bytes())
+    _write_legacy_image_vault(cover, stego, payload, "legacy-password")
+
+    result = reveal_folder(stego, cover, restored, "legacy-password")
+
+    assert result["mode"] == "image-lsb"
+    assert_restored(restored)
+
+
+def test_v2_payload_header_is_authenticated(tmp_path: Path) -> None:
+    import json
+    import struct
+
+    from cover_vault.crypto import PAYLOAD_MAGIC, decrypt_payload, encrypt_payload
+
+    cover_bytes = b"valid cover bytes"
+    payload = encrypt_payload(b"secret archive", "password", cover_bytes)
+    offset = len(PAYLOAD_MAGIC)
+    header_len = struct.unpack(">I", payload[offset : offset + 4])[0]
+    header_start = offset + 4
+    header_end = header_start + header_len
+    header = json.loads(payload[header_start:header_end].decode("utf-8"))
+    header["untrusted_note"] = "changed"
+    changed_header = json.dumps(header, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    tampered = (
+        PAYLOAD_MAGIC
+        + struct.pack(">I", len(changed_header))
+        + changed_header
+        + payload[header_end:]
+    )
+
+    with pytest.raises(CoverVaultError, match="Could not decrypt"):
+        decrypt_payload(tampered, "password", cover_bytes)
+
+
+def test_kdf_bounds_reject_excessive_work_factor() -> None:
+    import base64
+
+    from cover_vault.crypto import KDF_NAME, KdfParams, derive_master_key
+
+    params = KdfParams(
+        name=KDF_NAME,
+        salt=base64.urlsafe_b64encode(b"0" * 16).decode("ascii"),
+        n=2**30,
+        r=8,
+        p=1,
+    )
+    with pytest.raises(CoverVaultError, match="work factor"):
+        derive_master_key("password", params, b"cover")
+
+
+def test_v2_lsb_placement_rejects_legacy_fast_seed(tmp_path: Path) -> None:
+    from cover_vault.stego import extract_payload_image, legacy_position_seed
+
+    source = tmp_path / "source"
+    cover = tmp_path / "cover.png"
+    stego = tmp_path / "cover.stego.png"
+    make_source_folder(source)
+    make_png(cover)
+    hide_folder(source, cover, stego, "password", mode="image-lsb")
+
+    old_seed = legacy_position_seed("image-lsb", cover.read_bytes(), "password")
+    with pytest.raises(CoverVaultError, match="payload marker"):
+        extract_payload_image(stego, old_seed, use_v2=True)
+
+
+def test_invalid_archive_does_not_destroy_existing_destination(tmp_path: Path) -> None:
+    import io
+    import tarfile
+
+    from cover_vault.archive import extract_archive
+
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    sentinel = destination / "keep.txt"
+    sentinel.write_text("keep me", encoding="utf-8")
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        info = tarfile.TarInfo("../escape.txt")
+        content = b"bad"
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+
+    with pytest.raises(CoverVaultError, match="unsafe archive path"):
+        extract_archive(buffer.getvalue(), destination, overwrite=True)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep me"

@@ -5,23 +5,41 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
-      - run: pip install -e '.[test]'
-      - run: pytest
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install development dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Lint and test
+        run: |
+          ruff check .
+          ruff format --check .
+          python -m pytest -q
 
   windows:
-    needs: test
+    needs: verify
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build installer
@@ -29,55 +47,69 @@ jobs:
         env:
           COVER_VAULT_VERSION: ${{ github.ref_name }}
         run: |
-          $env:COVER_VAULT_VERSION = $env:COVER_VAULT_VERSION.TrimStart('v')
+          $version = $env:COVER_VAULT_VERSION.TrimStart('v')
+          if ($version -notmatch '^\d') {
+            $version = "0.0.0.$env:GITHUB_RUN_NUMBER"
+          }
+          $env:COVER_VAULT_VERSION = $version
           ./packaging/windows/build.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows-installer
           path: dist/installer/*.exe
+          if-no-files-found: error
 
   macos:
-    needs: test
+    needs: verify
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Build DMG
         env:
           COVER_VAULT_VERSION: ${{ github.ref_name }}
         run: |
-          export COVER_VAULT_VERSION="${COVER_VAULT_VERSION#v}"
+          RAW_VERSION="${COVER_VAULT_VERSION#v}"
+          if [[ "$RAW_VERSION" =~ ^[0-9] ]]; then
+            export COVER_VAULT_VERSION="$RAW_VERSION"
+          else
+            export COVER_VAULT_VERSION="0.0.0.${GITHUB_RUN_NUMBER}"
+          fi
           bash ./packaging/macos/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: macos-dmg
           path: dist/*.dmg
+          if-no-files-found: error
 
   linux:
-    needs: test
+    needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Build DEB
         env:
           COVER_VAULT_VERSION: ${{ github.ref_name }}
         run: |
           RAW_VERSION="${COVER_VAULT_VERSION#v}"
-
-          # Debian versions must start with a digit.
           if [[ "$RAW_VERSION" =~ ^[0-9] ]]; then
             export COVER_VAULT_VERSION="$RAW_VERSION"
           else
-            # Fallback for non-tag refs like "main"
             export COVER_VAULT_VERSION="0.0.0+${GITHUB_RUN_NUMBER}"
           fi
-
           chmod +x packaging/linux/build.sh
           bash packaging/linux/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: linux-deb
           path: dist/*.deb
+          if-no-files-found: error

@@ -9,11 +9,13 @@ cover.stego.wav/png/pdf      # cover carrying the encrypted folder payload
 restored-codebase/           # recovered folder after reveal
 ```
 
-To reveal a folder, you need:
+To reveal a WAV or image vault, you need:
 
 1. the stego file,
 2. the password, and
 3. the exact original cover-file bytes, from a local file or the original download URL.
+
+PDF mode also asks for the original cover, but the current trailing-data PDF format preserves the original PDF as the beginning of the stego file. The PDF cover must therefore not be treated as an independent secret or second factor.
 
 ## What gets archived
 
@@ -73,16 +75,18 @@ JPEG and lossy WebP output are not supported because lossy encoding can destroy 
 
 ### `pdf-append`
 
-Appends a structured encrypted payload after the PDF's final `%%EOF` marker. Most PDF readers tolerate trailing data, so the resulting file remains usable as a PDF.
+Appends a structured encrypted payload after the PDF's final `%%EOF` marker. Many PDF readers tolerate trailing data, so the resulting file normally remains viewable as a PDF.
 
 Important differences from the LSB modes:
 
-- PDF mode does not alter page pixels, text, or objects.
-- It is broadly compatible and fully reversible.
-- It is less covert than LSB embedding because appended data can be found by inspecting the file structure or size.
-- PDF optimization, sanitization, rewriting, linearization, or “Save As” operations may remove the appended payload.
+- PDF mode does not alter page pixels, text, or existing PDF objects.
+- The encrypted folder remains protected by the password-based encryption.
+- The appended block is easy to discover through file inspection and is not rigorous steganography.
+- The result is not a standards-compliant incremental PDF update. Strict validators or document gateways may reject or rewrite it.
+- PDF optimization, sanitization, linearization, or “Save As” operations may remove the payload.
+- The original PDF bytes remain present at the start of the stego file, so the cover is not an independent recovery factor in this mode.
 
-Use an ordinary, sufficiently large PDF and keep the exact original PDF unchanged for recovery.
+Use PDF mode as a convenient encrypted container that still opens in many readers, not as a covert or archival-grade PDF mechanism. Keep a separate backup of important vaults.
 
 ## Capacity and cover selection
 
@@ -115,17 +119,27 @@ Use `1.0` to disable the ratio guard. This does not make a high-ratio carrier di
 
 ## Security model
 
-Cover Vault uses:
+New vaults use format version 2 with:
 
-- `scrypt` to derive a 256-bit key from the password and exact original cover bytes,
+- `scrypt` with `N=2^17`, `r=8`, and `p=1` to derive a 256-bit cover-bound master key,
+- separate HKDF-derived keys for payload encryption and LSB placement,
 - AES-256-GCM authenticated encryption,
+- the complete serialized payload header authenticated as AES-GCM associated data,
 - a fresh random salt and nonce per payload,
 - a compressed `tar.gz` archive before encryption,
-- password-and-cover-derived pseudorandom bit placement for WAV and image modes.
+- a small non-secret LSB bootstrap containing only bounded KDF parameters, followed by keyed pseudorandom payload placement.
 
-The original cover is part of key derivation. A modified, re-encoded, optimized, or otherwise non-identical original cover will not unlock the payload.
+The LSB bootstrap allows recovery software to perform the memory-hard KDF before it can locate and verify the hidden marker. This prevents the earlier format from exposing a cheap SHA-256 password-check path. New image and WAV vaults are always written using this version-2 placement design.
+
+KDF metadata, nonce lengths, header sizes, archive member counts, extraction sizes, and path depth are validated before expensive or destructive operations. Output carrier files are written through a temporary sibling file and atomically replaced only after a successful write. Folder restoration is staged in a temporary directory, so a malformed archive does not erase an existing destination before validation completes.
+
+Version-1 encrypted payloads and the earlier image/WAV placement format remain readable for migration, but newly created vaults use version 2. Re-create important old vaults to receive the stronger KDF, authenticated metadata, and safer placement scheme.
+
+The original WAV or image cover is part of key derivation. A modified, re-encoded, optimized, or otherwise non-identical original cover will not unlock the payload. As noted above, PDF trailing-data mode does not provide the same independent-cover property because the original PDF prefix is retained inside the output.
 
 Passwords supplied with `--password` may be visible in shell history or process listings. For interactive use, omit the option and enter the password at the prompt.
+
+This project provides authenticated encryption, but its carrier techniques should not be assumed to make encrypted data undetectable. Use a long, unique password and retain tested backups.
 
 ## Installation for local development
 
@@ -137,11 +151,22 @@ source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -e .
 ```
 
-Run tests:
+Install development checks and run them locally:
 
 ```bash
+pip install -e '.[dev]'
+ruff check .
+ruff format --check .
 python -m pytest
 ```
+
+Repository automation includes:
+
+- `.github/workflows/ci.yml` for Ruff checks, a Python/OS test matrix, and package-build validation,
+- `.github/workflows/codeql.yml` for scheduled and pull-request CodeQL analysis,
+- `.github/workflows/dependency-review.yml` to reject newly introduced high-severity vulnerable dependencies in pull requests,
+- `.github/workflows/release.yml` for verified Windows, macOS, and Linux installer builds,
+- `.github/dependabot.yml` for weekly Python and GitHub Actions dependency updates.
 
 ## Command-line usage
 
@@ -284,7 +309,7 @@ Push a version tag such as `v1.0.0`, or run the workflow manually, to build all 
 - `macos-dmg`,
 - `linux-deb`.
 
-The workflow runs the test suite before building packages. Production releases should additionally configure Windows code signing and Apple signing/notarization secrets.
+The workflow runs Ruff formatting/lint checks and the full test suite before building packages. Production releases should additionally configure Windows code signing and Apple signing/notarization secrets.
 
 ## Desktop packaging notes
 

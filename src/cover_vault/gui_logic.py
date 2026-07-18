@@ -11,7 +11,11 @@ def build_excludes(include_git_history: bool, custom_text: str) -> tuple[str, ..
     defaults = set(DEFAULT_EXCLUDES)
     if include_git_history:
         defaults.discard(GIT_HISTORY_EXCLUDE)
-    custom = {item.strip() for item in custom_text.replace(";", ",").split(",") if item.strip()}
+    custom = {
+        item.strip()
+        for item in custom_text.replace(";", ",").split(",")
+        if item.strip()
+    }
     return tuple(sorted(defaults | custom))
 
 
@@ -33,7 +37,11 @@ def format_bytes(value: int) -> str:
 
 
 def capacity_summary(plan: dict) -> str:
-    status = "Ready" if plan["fits_capacity"] and plan["fits_ratio_limit"] else "Does not fit"
+    status = (
+        "Ready"
+        if plan["fits_capacity"] and plan["fits_ratio_limit"]
+        else "Does not fit"
+    )
     return (
         f"{status} — {plan['files_to_encrypt']} files, "
         f"estimated payload {format_bytes(plan['estimated_payload_bytes'])}, "

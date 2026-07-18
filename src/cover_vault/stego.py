@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
-import random
+import json
 import struct
 import wave
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Sequence
 
+from .crypto import KdfParams
 from .errors import CoverVaultError
+from .io_utils import atomic_output_path, atomic_write_bytes
 
-WAV_STEGO_MAGIC = b"CVWAV2\x00"
-IMAGE_STEGO_MAGIC = b"CVIMG1\x00"
+LEGACY_WAV_STEGO_MAGIC = b"CVWAV2\x00"
+LEGACY_IMAGE_STEGO_MAGIC = b"CVIMG1\x00"
+WAV_STEGO_MAGIC = b"CVWAV3\x00"
+IMAGE_STEGO_MAGIC = b"CVIMG2\x00"
+LSB_BOOTSTRAP_MAGIC = b"CVLSB2\x00"
+MAX_LSB_BOOTSTRAP_BYTES = 4096
 PDF_STEGO_MAGIC = b"CVPDF1\x00"
 PDF_STEGO_FOOTER = b"CVPDFEND1\x00"
 LOSSLESS_IMAGE_OUTPUT_FORMATS = {
@@ -24,7 +31,9 @@ HIGH_USAGE_WARNING_RATIO = 0.10
 DEFAULT_MAX_USAGE_RATIO = 0.25
 
 
-def position_seed(mode: str, cover_bytes: bytes, password: str) -> bytes:
+def legacy_position_seed(mode: str, cover_bytes: bytes, password: str) -> bytes:
+    """Version-1 placement seed retained only for reading old vaults."""
+
     if not password:
         raise CoverVaultError("Password cannot be empty.")
     return hashlib.sha256(
@@ -37,22 +46,23 @@ def position_seed(mode: str, cover_bytes: bytes, password: str) -> bytes:
     ).digest()
 
 
-def _bytes_to_bits(data: bytes):
+# Backward-compatible import name. New vault creation never uses this function.
+position_seed = legacy_position_seed
+
+
+def _bytes_to_bits(data: bytes) -> Iterable[int]:
     for byte in data:
         for bit_index in range(7, -1, -1):
             yield (byte >> bit_index) & 1
 
 
-def _bits_to_bytes(bits: list[int]) -> bytes:
-    if len(bits) % 8 != 0:
+def _bits_to_bytes(bits: Iterable[int], expected_bits: int) -> bytes:
+    if expected_bits % 8 != 0:
         raise CoverVaultError("Bit stream length must be a multiple of 8.")
-    out = bytearray()
-    for start in range(0, len(bits), 8):
-        value = 0
-        for bit in bits[start : start + 8]:
-            value = (value << 1) | bit
-        out.append(value)
-    return bytes(out)
+    output = bytearray(expected_bits // 8)
+    for index, bit in enumerate(bits):
+        output[index // 8] |= bit << (7 - (index % 8))
+    return bytes(output)
 
 
 def _container(magic: bytes, payload: bytes) -> bytes:
@@ -98,46 +108,138 @@ def validate_capacity(
         )
 
 
-def _permuted_indices(count: int, seed: bytes) -> list[int]:
-    """Return a deterministic pseudorandom permutation of carrier positions.
+class _DeterministicHmacRng:
+    """Small deterministic CSPRNG used by the partial Fisher-Yates shuffle."""
 
-    Spreading changes across the full carrier avoids concentrating all changed
-    LSBs at the beginning of the audio/image stream. This is still a prototype
-    and not an undetectability guarantee.
-    """
+    def __init__(self, seed: bytes):
+        self._key = hashlib.sha256(seed).digest()
+        self._counter = 0
 
-    rng = random.Random(int.from_bytes(hashlib.sha256(seed).digest(), "big"))
-    indices = list(range(count))
-    rng.shuffle(indices)
-    return indices
+    def _block(self) -> bytes:
+        block = hmac.new(
+            self._key,
+            self._counter.to_bytes(16, "big"),
+            hashlib.sha256,
+        ).digest()
+        self._counter += 1
+        return block
+
+    def randbelow(self, upper_bound: int) -> int:
+        if upper_bound <= 0:
+            raise ValueError("upper_bound must be positive")
+        byte_count = max(1, (upper_bound.bit_length() + 7) // 8)
+        sample_space = 1 << (byte_count * 8)
+        acceptance_limit = sample_space - (sample_space % upper_bound)
+        while True:
+            value = int.from_bytes(self._block()[:byte_count], "big")
+            if value < acceptance_limit:
+                return value % upper_bound
+
+
+def _sampled_positions(count: int, take: int, seed: bytes) -> Iterable[int]:
+    """Yield unique keyed positions using O(take), rather than O(count), memory."""
+
+    if take < 0 or take > count:
+        raise CoverVaultError("Carrier does not have enough positions.")
+    rng = _DeterministicHmacRng(seed)
+    swaps: dict[int, int] = {}
+    for index in range(take):
+        chosen = index + rng.randbelow(count - index)
+        value_at_index = swaps.pop(index, index)
+        if chosen == index:
+            value_at_chosen = value_at_index
+        else:
+            value_at_chosen = swaps.pop(chosen, chosen)
+            swaps[chosen] = value_at_index
+        yield value_at_chosen
 
 
 def _write_bits_spread(
     carrier: bytearray, byte_indices: Sequence[int], data: bytes, seed: bytes
 ) -> None:
-    bits = list(_bytes_to_bits(data))
-    if len(bits) > len(byte_indices):
+    bit_count = len(data) * 8
+    if bit_count > len(byte_indices):
         raise CoverVaultError("Carrier does not have enough writable positions.")
-    positions = _permuted_indices(len(byte_indices), seed)[: len(bits)]
-    for position, bit in zip(positions, bits):
-        idx = byte_indices[position]
-        carrier[idx] = (carrier[idx] & 0xFE) | bit
+    positions = _sampled_positions(len(byte_indices), bit_count, seed)
+    for position, bit in zip(positions, _bytes_to_bits(data), strict=True):
+        carrier_index = byte_indices[position]
+        carrier[carrier_index] = (carrier[carrier_index] & 0xFE) | bit
 
 
-def _read_bits_spread(
-    carrier: bytearray, byte_indices: Sequence[int], bit_count: int, seed: bytes
-) -> list[int]:
+def _read_bytes_spread(
+    carrier: bytearray, byte_indices: Sequence[int], byte_count: int, seed: bytes
+) -> bytes:
+    bit_count = byte_count * 8
     if bit_count > len(byte_indices):
         raise CoverVaultError("Carrier does not have enough readable positions.")
-    positions = _permuted_indices(len(byte_indices), seed)[:bit_count]
-    return [carrier[byte_indices[position]] & 1 for position in positions]
+    positions = _sampled_positions(len(byte_indices), bit_count, seed)
+    bits = (carrier[byte_indices[position]] & 1 for position in positions)
+    return _bits_to_bytes(bits, bit_count)
+
+
+def _write_bytes_linear(
+    carrier: bytearray, byte_indices: Sequence[int], data: bytes
+) -> None:
+    bit_count = len(data) * 8
+    if bit_count > len(byte_indices):
+        raise CoverVaultError("Carrier does not have enough bootstrap capacity.")
+    for carrier_index, bit in zip(
+        byte_indices[:bit_count], _bytes_to_bits(data), strict=True
+    ):
+        carrier[carrier_index] = (carrier[carrier_index] & 0xFE) | bit
+
+
+def _read_bytes_linear(
+    carrier: bytearray, byte_indices: Sequence[int], byte_count: int
+) -> bytes:
+    bit_count = byte_count * 8
+    if bit_count > len(byte_indices):
+        raise CoverVaultError("Carrier does not have enough bootstrap capacity.")
+    bits = (carrier[index] & 1 for index in byte_indices[:bit_count])
+    return _bits_to_bytes(bits, bit_count)
+
+
+def _lsb_bootstrap(params: KdfParams) -> bytes:
+    header = json.dumps(
+        {"version": 2, "kdf": params.to_dict()},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(header) > MAX_LSB_BOOTSTRAP_BYTES:
+        raise CoverVaultError("LSB bootstrap metadata is too large.")
+    return LSB_BOOTSTRAP_MAGIC + struct.pack(">I", len(header)) + header
+
+
+def _estimated_lsb_bootstrap() -> bytes:
+    return _lsb_bootstrap(KdfParams.predictable_for_estimate())
+
+
+def _read_lsb_bootstrap(
+    carrier: bytearray, byte_indices: Sequence[int]
+) -> tuple[KdfParams | None, int]:
+    prefix_bytes = len(LSB_BOOTSTRAP_MAGIC) + 4
+    if len(byte_indices) < prefix_bytes * 8:
+        return None, 0
+    prefix = _read_bytes_linear(carrier, byte_indices, prefix_bytes)
+    if not prefix.startswith(LSB_BOOTSTRAP_MAGIC):
+        return None, 0
+    header_len = struct.unpack(">I", prefix[-4:])[0]
+    if header_len <= 0 or header_len > MAX_LSB_BOOTSTRAP_BYTES:
+        raise CoverVaultError("LSB bootstrap metadata length is invalid.")
+    total_bytes = prefix_bytes + header_len
+    encoded = _read_bytes_linear(carrier, byte_indices, total_bytes)
+    try:
+        header = json.loads(encoded[prefix_bytes:].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CoverVaultError("LSB bootstrap metadata is invalid.") from exc
+    if not isinstance(header, dict) or header.get("version") != 2:
+        raise CoverVaultError("Unsupported LSB bootstrap version.")
+    return KdfParams.from_dict(header.get("kdf")), total_bytes * 8
 
 
 def _sample_low_byte_indices(frame_bytes: bytearray, sample_width: int) -> list[int]:
     if sample_width not in {1, 2, 3, 4}:
         raise CoverVaultError(f"Unsupported WAV sample width: {sample_width} bytes")
-    # In PCM WAV, multi-byte samples are little-endian. Tweaking the low byte's
-    # least significant bit changes the sample by the smallest possible amount.
     return list(range(0, len(frame_bytes), sample_width))
 
 
@@ -157,7 +259,7 @@ def _read_wav_frames(cover_bytes: bytes) -> tuple[wave._wave_params, int, bytear
 def wav_capacity_bytes_from_bytes(cover_bytes: bytes) -> int:
     _, sample_width, frames = _read_wav_frames(cover_bytes)
     carrier_bits = len(_sample_low_byte_indices(frames, sample_width))
-    overhead_bits = (len(WAV_STEGO_MAGIC) + 8) * 8
+    overhead_bits = (len(_estimated_lsb_bootstrap()) + len(WAV_STEGO_MAGIC) + 8) * 8
     return max(0, (carrier_bits - overhead_bits) // 8)
 
 
@@ -171,6 +273,7 @@ def embed_payload_wav(
     payload: bytes,
     seed: bytes,
     *,
+    kdf_params: KdfParams,
     max_usage_ratio: float = DEFAULT_MAX_USAGE_RATIO,
 ) -> dict:
     output_path = Path(output_wav).expanduser()
@@ -183,42 +286,59 @@ def embed_payload_wav(
         max_usage_ratio=max_usage_ratio,
     )
 
-    data = _container(WAV_STEGO_MAGIC, payload)
     indices = _sample_low_byte_indices(frames, sample_width)
-    _write_bits_spread(frames, indices, data, seed)
+    bootstrap = _lsb_bootstrap(kdf_params)
+    bootstrap_bits = len(bootstrap) * 8
+    _write_bytes_linear(frames, indices, bootstrap)
+    _write_bits_spread(
+        frames,
+        indices[bootstrap_bits:],
+        _container(WAV_STEGO_MAGIC, payload),
+        seed,
+    )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(output_path), "wb") as out:
-        out.setparams(params)
-        out.writeframes(bytes(frames))
+    with atomic_output_path(output_path) as temporary_path:
+        with wave.open(str(temporary_path), "wb") as output:
+            output.setparams(params)
+            output.writeframes(bytes(frames))
     return describe_usage(len(payload), capacity)
 
 
-def extract_payload_wav(stego_file: Path | str, seed: bytes) -> bytes:
+def read_wav_kdf_params(stego_file: Path | str) -> KdfParams | None:
     stego_bytes = Path(stego_file).expanduser().read_bytes()
     _, sample_width, frames = _read_wav_frames(stego_bytes)
     indices = _sample_low_byte_indices(frames, sample_width)
-    header_bits_needed = (len(WAV_STEGO_MAGIC) + 8) * 8
-    if len(indices) < header_bits_needed:
-        raise CoverVaultError(
-            "Stego WAV is too small to contain a Cover Vault payload."
-        )
+    params, _ = _read_lsb_bootstrap(frames, indices)
+    return params
 
-    header_bits = _read_bits_spread(frames, indices, header_bits_needed, seed)
-    header = _bits_to_bytes(header_bits)
-    if not header.startswith(WAV_STEGO_MAGIC):
+
+def extract_payload_wav(
+    stego_file: Path | str, seed: bytes, *, use_v2: bool = True
+) -> bytes:
+    stego_bytes = Path(stego_file).expanduser().read_bytes()
+    _, sample_width, frames = _read_wav_frames(stego_bytes)
+    indices = _sample_low_byte_indices(frames, sample_width)
+    bootstrap_params, bootstrap_bits = _read_lsb_bootstrap(frames, indices)
+    if use_v2:
+        if bootstrap_params is None:
+            raise CoverVaultError("No version-2 Cover Vault WAV bootstrap found.")
+        magic = WAV_STEGO_MAGIC
+        payload_indices = indices[bootstrap_bits:]
+    else:
+        magic = LEGACY_WAV_STEGO_MAGIC
+        payload_indices = indices
+
+    header_bytes_needed = len(magic) + 8
+    header = _read_bytes_spread(frames, payload_indices, header_bytes_needed, seed)
+    if not header.startswith(magic):
         raise CoverVaultError("No Cover Vault WAV payload marker found.")
-    payload_len = struct.unpack(
-        ">Q", header[len(WAV_STEGO_MAGIC) : len(WAV_STEGO_MAGIC) + 8]
-    )[0]
-    total_bits_needed = header_bits_needed + payload_len * 8
-    if len(indices) < total_bits_needed:
+    payload_len = struct.unpack(">Q", header[len(magic) :])[0]
+    if payload_len > (len(payload_indices) // 8) - header_bytes_needed:
         raise CoverVaultError("Stego WAV payload appears truncated.")
-
-    payload_bits = _read_bits_spread(frames, indices, total_bits_needed, seed)[
-        header_bits_needed:
-    ]
-    return _bits_to_bytes(payload_bits)
+    container = _read_bytes_spread(
+        frames, payload_indices, header_bytes_needed + payload_len, seed
+    )
+    return container[header_bytes_needed:]
 
 
 def _load_rgba_image(image_bytes: bytes):
@@ -250,7 +370,7 @@ def image_capacity_bytes_from_bytes(image_bytes: bytes) -> int:
     image = _load_rgba_image(image_bytes)
     pixel_bytes = bytearray(image.tobytes())
     carrier_bits = len(_rgb_channel_indices_rgba(pixel_bytes))
-    overhead_bits = (len(IMAGE_STEGO_MAGIC) + 8) * 8
+    overhead_bits = (len(_estimated_lsb_bootstrap()) + len(IMAGE_STEGO_MAGIC) + 8) * 8
     return max(0, (carrier_bits - overhead_bits) // 8)
 
 
@@ -260,14 +380,14 @@ def image_capacity_bytes(image_file: Path | str) -> int:
 
 def _image_save_format(output_file: Path | str) -> str:
     suffix = Path(output_file).expanduser().suffix.lower()
-    fmt = LOSSLESS_IMAGE_OUTPUT_FORMATS.get(suffix)
-    if fmt is None:
+    output_format = LOSSLESS_IMAGE_OUTPUT_FORMATS.get(suffix)
+    if output_format is None:
         allowed = ", ".join(sorted(LOSSLESS_IMAGE_OUTPUT_FORMATS))
         raise CoverVaultError(
             f"Image mode must write a lossless output format ({allowed}). "
             "Do not use JPEG/WebP output because lossy encoders can destroy hidden bits."
         )
-    return fmt
+    return output_format
 
 
 def embed_payload_image(
@@ -276,6 +396,7 @@ def embed_payload_image(
     payload: bytes,
     seed: bytes,
     *,
+    kdf_params: KdfParams,
     max_usage_ratio: float = DEFAULT_MAX_USAGE_RATIO,
 ) -> dict:
     output_path = Path(output_image).expanduser()
@@ -283,7 +404,7 @@ def embed_payload_image(
     image = _load_rgba_image(cover_bytes)
     pixel_bytes = bytearray(image.tobytes())
     indices = _rgb_channel_indices_rgba(pixel_bytes)
-    capacity = max(0, (len(indices) - (len(IMAGE_STEGO_MAGIC) + 8) * 8) // 8)
+    capacity = image_capacity_bytes_from_bytes(cover_bytes)
     validate_capacity(
         mode="image-lsb",
         payload_bytes=len(payload),
@@ -291,49 +412,66 @@ def embed_payload_image(
         max_usage_ratio=max_usage_ratio,
     )
 
-    data = _container(IMAGE_STEGO_MAGIC, payload)
-    _write_bits_spread(pixel_bytes, indices, data, seed)
+    bootstrap = _lsb_bootstrap(kdf_params)
+    bootstrap_bits = len(bootstrap) * 8
+    _write_bytes_linear(pixel_bytes, indices, bootstrap)
+    _write_bits_spread(
+        pixel_bytes,
+        indices[bootstrap_bits:],
+        _container(IMAGE_STEGO_MAGIC, payload),
+        seed,
+    )
 
     from PIL import Image
 
     stego = Image.frombytes("RGBA", image.size, bytes(pixel_bytes))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_format == "BMP":
-        # BMP has no alpha in the common RGB output; PNG/TIFF preserve alpha.
-        stego.convert("RGB").save(output_path, format=output_format)
-    elif output_format == "TIFF":
-        stego.save(output_path, format=output_format, compression="raw")
-    else:
-        stego.save(output_path, format=output_format)
+    with atomic_output_path(output_path) as temporary_path:
+        if output_format == "BMP":
+            stego.convert("RGB").save(temporary_path, format=output_format)
+        elif output_format == "TIFF":
+            stego.save(temporary_path, format=output_format, compression="raw")
+        else:
+            stego.save(temporary_path, format=output_format)
     return describe_usage(len(payload), capacity)
 
 
-def extract_payload_image(stego_file: Path | str, seed: bytes) -> bytes:
+def read_image_kdf_params(stego_file: Path | str) -> KdfParams | None:
     stego_bytes = Path(stego_file).expanduser().read_bytes()
     image = _load_rgba_image(stego_bytes)
     pixel_bytes = bytearray(image.tobytes())
     indices = _rgb_channel_indices_rgba(pixel_bytes)
-    header_bits_needed = (len(IMAGE_STEGO_MAGIC) + 8) * 8
-    if len(indices) < header_bits_needed:
-        raise CoverVaultError(
-            "Stego image is too small to contain a Cover Vault payload."
-        )
+    params, _ = _read_lsb_bootstrap(pixel_bytes, indices)
+    return params
 
-    header_bits = _read_bits_spread(pixel_bytes, indices, header_bits_needed, seed)
-    header = _bits_to_bytes(header_bits)
-    if not header.startswith(IMAGE_STEGO_MAGIC):
+
+def extract_payload_image(
+    stego_file: Path | str, seed: bytes, *, use_v2: bool = True
+) -> bytes:
+    stego_bytes = Path(stego_file).expanduser().read_bytes()
+    image = _load_rgba_image(stego_bytes)
+    pixel_bytes = bytearray(image.tobytes())
+    indices = _rgb_channel_indices_rgba(pixel_bytes)
+    bootstrap_params, bootstrap_bits = _read_lsb_bootstrap(pixel_bytes, indices)
+    if use_v2:
+        if bootstrap_params is None:
+            raise CoverVaultError("No version-2 Cover Vault image bootstrap found.")
+        magic = IMAGE_STEGO_MAGIC
+        payload_indices = indices[bootstrap_bits:]
+    else:
+        magic = LEGACY_IMAGE_STEGO_MAGIC
+        payload_indices = indices
+
+    header_bytes_needed = len(magic) + 8
+    header = _read_bytes_spread(pixel_bytes, payload_indices, header_bytes_needed, seed)
+    if not header.startswith(magic):
         raise CoverVaultError("No Cover Vault image payload marker found.")
-    payload_len = struct.unpack(
-        ">Q", header[len(IMAGE_STEGO_MAGIC) : len(IMAGE_STEGO_MAGIC) + 8]
-    )[0]
-    total_bits_needed = header_bits_needed + payload_len * 8
-    if len(indices) < total_bits_needed:
+    payload_len = struct.unpack(">Q", header[len(magic) :])[0]
+    if payload_len > (len(payload_indices) // 8) - header_bytes_needed:
         raise CoverVaultError("Stego image payload appears truncated.")
-
-    payload_bits = _read_bits_spread(pixel_bytes, indices, total_bits_needed, seed)[
-        header_bits_needed:
-    ]
-    return _bits_to_bytes(payload_bits)
+    container = _read_bytes_spread(
+        pixel_bytes, payload_indices, header_bytes_needed + payload_len, seed
+    )
+    return container[header_bytes_needed:]
 
 
 def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
@@ -344,11 +482,8 @@ def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
 
 
 def pdf_usage_capacity_bytes_from_bytes(pdf_bytes: bytes) -> int:
-    """Return the reference capacity used for PDF cover-ratio guidance.
+    """Return the reference capacity used for PDF cover-ratio guidance."""
 
-    PDF append mode is not physically bounded like LSB carriers, so the original
-    PDF byte length is used as the denominator for the configurable usage guard.
-    """
     _validate_pdf_bytes(pdf_bytes)
     return len(pdf_bytes)
 
@@ -374,8 +509,7 @@ def embed_payload_pdf(
     )
     container = _container(PDF_STEGO_MAGIC, payload)
     footer = PDF_STEGO_FOOTER + struct.pack(">Q", len(container))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(cover_bytes + b"\n" + container + footer)
+    atomic_write_bytes(output_path, cover_bytes + b"\n" + container + footer)
     return describe_usage(len(payload), capacity)
 
 
@@ -392,9 +526,7 @@ def extract_payload_pdf(stego_file: Path | str) -> bytes:
     header_len = len(PDF_STEGO_MAGIC) + 8
     if len(container) < header_len or not container.startswith(PDF_STEGO_MAGIC):
         raise CoverVaultError("No Cover Vault PDF payload marker found.")
-    payload_len = struct.unpack(
-        ">Q", container[len(PDF_STEGO_MAGIC) : header_len]
-    )[0]
+    payload_len = struct.unpack(">Q", container[len(PDF_STEGO_MAGIC) : header_len])[0]
     payload = container[header_len:]
     if len(payload) != payload_len:
         raise CoverVaultError("Stego PDF payload appears truncated.")

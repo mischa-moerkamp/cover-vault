@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cover-vault"
-version = "1.0.0"
+version = "1.1.0"
 description = "Password-protected folder vaults hidden inside cover files."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,17 +18,24 @@ build = [
   "pyinstaller>=6.8.0"
 ]
 test = [
-  "pytest>=7.0.0"
+  "pytest>=8.0.0"
 ]
 dev = [
-  "pytest>=7.0.0",
-  "black>=24.0.0",
-  "ruff>=0.5.0"
+  "pytest>=8.0.0",
+  "pytest-cov>=5.0.0",
+  "ruff>=0.8.0"
 ]
-
 [project.scripts]
 cover-vault = "cover_vault.cli:main"
 cover-vault-gui = "cover_vault.gui:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
