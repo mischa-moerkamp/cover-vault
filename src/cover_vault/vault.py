@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 from .archive import DEFAULT_EXCLUDES, extract_archive, make_archive
-from .cover import read_cover
+from .cover import local_cover_path, read_cover
 from .crypto import (
     KdfParams,
     cover_hash_hex,
@@ -95,9 +95,28 @@ def hide_folder(
     mode: CarrierMode = "auto",
     excludes: Iterable[str] = DEFAULT_EXCLUDES,
     max_usage_ratio: float = DEFAULT_MAX_USAGE_RATIO,
+    overwrite_output: bool = False,
     progress: ProgressCallback | None = None,
 ) -> dict:
     """Encrypt a folder and hide the encrypted payload in a cover file."""
+
+    source_path = Path(source_folder).expanduser().resolve(strict=False)
+    output_path = Path(output_file).expanduser().resolve(strict=False)
+    cover_path = local_cover_path(cover_source)
+    if cover_path is not None and output_path == cover_path:
+        raise CoverVaultError(
+            "Output must not be the original cover file. Keep the exact original cover unchanged for recovery."
+        )
+    if output_path == source_path or source_path in output_path.parents:
+        raise CoverVaultError(
+            "Output must be outside the source folder so it cannot be included in or replace source data."
+        )
+    if output_path.exists() and not overwrite_output:
+        raise CoverVaultError(
+            f"Output already exists: {output_path}. Use the explicit overwrite option to replace it."
+        )
+    if output_path.exists() and output_path.is_dir():
+        raise CoverVaultError(f"Output path is a directory: {output_path}")
 
     report(progress, 0.02, "Reading cover file")
     cover_bytes = read_cover(cover_source)
@@ -119,6 +138,7 @@ def hide_folder(
             seed,
             kdf_params=encrypted.kdf_params,
             max_usage_ratio=max_usage_ratio,
+            overwrite=overwrite_output,
         )
     elif detected_mode == "image-lsb":
         seed = derive_placement_seed(encrypted.master_key, detected_mode, cover_bytes)
@@ -129,6 +149,7 @@ def hide_folder(
             seed,
             kdf_params=encrypted.kdf_params,
             max_usage_ratio=max_usage_ratio,
+            overwrite=overwrite_output,
         )
     elif detected_mode == "pdf-attachment":
         usage = embed_payload_pdf(
@@ -136,6 +157,7 @@ def hide_folder(
             output_file,
             encrypted.payload,
             max_usage_ratio=max_usage_ratio,
+            overwrite=overwrite_output,
         )
     else:  # pragma: no cover - guarded by mode detection
         raise CoverVaultError(f"Unsupported carrier mode: {detected_mode}")
@@ -143,6 +165,9 @@ def hide_folder(
     report(progress, 1.0, "Vault created")
     return {
         "format_version": 2,
+        "lsb_placement_version": 3
+        if detected_mode in {"wav-lsb", "image-lsb"}
+        else None,
         "mode": detected_mode,
         "output": str(Path(output_file).expanduser()),
         "files_encrypted": files_added,
@@ -163,15 +188,15 @@ def _extract_lsb_payload(
     password: str,
 ) -> tuple[bytes, bytes, KdfParams]:
     if mode == "wav-lsb":
-        params = read_wav_kdf_params(stego_file)
+        params = read_wav_kdf_params(stego_file, cover_bytes)
         extractor = extract_payload_wav
     else:
-        params = read_image_kdf_params(stego_file)
+        params = read_image_kdf_params(stego_file, cover_bytes)
         extractor = extract_payload_image
 
     master_key = derive_master_key(password, params, cover_bytes)
     seed = derive_placement_seed(master_key, mode, cover_bytes)
-    return extractor(stego_file, seed), master_key, params
+    return extractor(stego_file, seed, cover_bytes), master_key, params
 
 
 def _extract_payload(
@@ -237,8 +262,15 @@ def reveal_folder(
         expected_kdf_params=kdf_params,
     )
     report(progress, 0.76, "Restoring files")
+    protected_paths: list[Path | str] = [stego_file]
+    local_original_cover = local_cover_path(cover_source)
+    if local_original_cover is not None:
+        protected_paths.append(local_original_cover)
     files_written = extract_archive(
-        archive_bytes, destination_folder, overwrite=overwrite
+        archive_bytes,
+        destination_folder,
+        overwrite=overwrite,
+        protected_paths=protected_paths,
     )
     report(progress, 1.0, "Folder restored")
     return {
@@ -296,6 +328,9 @@ def plan_folder(
 
     return {
         "format_version": 2,
+        "lsb_placement_version": 3
+        if detected_mode in {"wav-lsb", "image-lsb"}
+        else None,
         "mode": detected_mode,
         "files_to_encrypt": files_added,
         "archive_bytes": len(archive_bytes),

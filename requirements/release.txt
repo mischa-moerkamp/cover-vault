@@ -1,0 +1,6 @@
+# Exact top-level inputs used by the desktop installer builds.
+# Update deliberately and validate all three operating-system jobs together.
+cryptography==49.0.0
+Pillow==12.3.0
+pypdf==6.14.2
+pyinstaller==6.21.0

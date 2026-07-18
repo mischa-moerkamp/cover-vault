@@ -365,7 +365,7 @@ def test_kdf_bounds_reject_excessive_work_factor() -> None:
         r=8,
         p=1,
     )
-    with pytest.raises(CoverVaultError, match="work factor"):
+    with pytest.raises(CoverVaultError, match="Unsupported scrypt parameters"):
         derive_master_key("password", params, b"cover")
 
 
@@ -380,7 +380,9 @@ def test_lsb_payload_rejects_an_unrelated_seed(tmp_path: Path) -> None:
     hide_folder(source, cover, stego, "password", mode="image-lsb")
 
     with pytest.raises(CoverVaultError, match="payload marker"):
-        extract_payload_image(stego, b"not-the-derived-placement-key")
+        extract_payload_image(
+            stego, b"not-the-derived-placement-key", cover.read_bytes()
+        )
 
 
 def test_pdf_cover_rejects_reserved_attachment(tmp_path: Path) -> None:
@@ -428,3 +430,235 @@ def test_invalid_archive_does_not_destroy_existing_destination(tmp_path: Path) -
         extract_archive(buffer.getvalue(), destination, overwrite=True)
 
     assert sentinel.read_text(encoding="utf-8") == "keep me"
+
+
+def test_hide_rejects_original_cover_as_output(tmp_path: Path) -> None:
+    source = tmp_path / "source-same-cover"
+    cover = tmp_path / "cover-same.png"
+    make_source_folder(source)
+    make_png(cover)
+    original = cover.read_bytes()
+
+    with pytest.raises(CoverVaultError, match="original cover"):
+        hide_folder(
+            source,
+            cover,
+            cover,
+            "password",
+            mode="image-lsb",
+            overwrite_output=True,
+        )
+
+    assert cover.read_bytes() == original
+
+
+def test_hide_requires_explicit_output_overwrite(tmp_path: Path) -> None:
+    source = tmp_path / "source-output-overwrite"
+    cover = tmp_path / "cover-output.png"
+    output = tmp_path / "vault-output.png"
+    make_source_folder(source)
+    make_png(cover)
+    output.write_bytes(b"keep")
+
+    with pytest.raises(CoverVaultError, match="Output already exists"):
+        hide_folder(source, cover, output, "password", mode="image-lsb")
+    assert output.read_bytes() == b"keep"
+
+    result = hide_folder(
+        source,
+        cover,
+        output,
+        "password",
+        mode="image-lsb",
+        overwrite_output=True,
+    )
+    assert result["output"] == str(output)
+    assert output.read_bytes() != b"keep"
+
+
+def test_hide_rejects_output_inside_source(tmp_path: Path) -> None:
+    source = tmp_path / "source-inside"
+    cover = tmp_path / "cover-inside.png"
+    make_source_folder(source)
+    make_png(cover)
+
+    with pytest.raises(CoverVaultError, match="outside the source folder"):
+        hide_folder(
+            source,
+            cover,
+            source / "vault.png",
+            "password",
+            mode="image-lsb",
+        )
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links unavailable")
+def test_hard_linked_files_restore_as_independent_regular_files(tmp_path: Path) -> None:
+    source = tmp_path / "source-hardlink"
+    source.mkdir()
+    first = source / "first.txt"
+    second = source / "second.txt"
+    first.write_text("shared content", encoding="utf-8")
+    os.link(first, second)
+    cover = tmp_path / "cover-hardlink.png"
+    stego = tmp_path / "vault-hardlink.png"
+    restored = tmp_path / "restored-hardlink"
+    make_png(cover)
+
+    hide_folder(source, cover, stego, "password", mode="image-lsb")
+    reveal_folder(stego, cover, restored, "password", mode="image-lsb")
+
+    assert (restored / "first.txt").read_text(encoding="utf-8") == "shared content"
+    assert (restored / "second.txt").read_text(encoding="utf-8") == "shared content"
+    assert (restored / "first.txt").stat().st_ino != (
+        restored / "second.txt"
+    ).stat().st_ino
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX special files")
+def test_fifo_is_rejected_before_vault_creation(tmp_path: Path) -> None:
+    source = tmp_path / "source-fifo"
+    source.mkdir()
+    fifo = source / "pipe"
+    os.mkfifo(fifo)
+    cover = tmp_path / "cover-fifo.png"
+    output = tmp_path / "vault-fifo.png"
+    make_png(cover)
+
+    with pytest.raises(
+        CoverVaultError, match="unsupported.*special|special filesystem"
+    ):
+        hide_folder(source, cover, output, "password", mode="image-lsb")
+    assert not output.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symbolic links unavailable")
+def test_symbolic_link_is_reported_instead_of_silently_skipped(tmp_path: Path) -> None:
+    source = tmp_path / "source-symlink"
+    source.mkdir()
+    target = source / "target.txt"
+    target.write_text("data", encoding="utf-8")
+    link = source / "link.txt"
+    try:
+        link.symlink_to(target.name)
+    except OSError:
+        pytest.skip("symbolic links are not permitted")
+    cover = tmp_path / "cover-symlink.png"
+    output = tmp_path / "vault-symlink.png"
+    make_png(cover)
+
+    with pytest.raises(CoverVaultError, match="symbolic links"):
+        hide_folder(source, cover, output, "password", mode="image-lsb")
+    assert not output.exists()
+
+
+def test_restore_rejects_destination_containing_vault(tmp_path: Path) -> None:
+    source = tmp_path / "source-protected"
+    cover = tmp_path / "cover-protected.png"
+    stego = tmp_path / "vault-protected.png"
+    make_source_folder(source)
+    make_png(cover)
+    hide_folder(source, cover, stego, "password", mode="image-lsb")
+
+    with pytest.raises(CoverVaultError, match="contains the vault"):
+        reveal_folder(
+            stego,
+            cover,
+            tmp_path,
+            "password",
+            mode="image-lsb",
+            overwrite=True,
+        )
+    assert stego.exists()
+    assert cover.exists()
+
+
+def test_restore_rejects_current_working_directory(tmp_path: Path, monkeypatch) -> None:
+    import io
+    import tarfile
+
+    from cover_vault.archive import extract_archive
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        content = b"safe"
+        info = tarfile.TarInfo("file.txt")
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    with pytest.raises(CoverVaultError, match="current working directory"):
+        extract_archive(buffer.getvalue(), work, overwrite=True)
+
+
+def test_restore_rolls_back_when_final_replace_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cover_vault import archive as archive_module
+    from cover_vault.archive import extract_archive, make_archive
+
+    source = tmp_path / "source-rollback"
+    source.mkdir()
+    (source / "new.txt").write_text("new", encoding="utf-8")
+    archive_bytes, _ = make_archive(source)
+
+    destination = tmp_path / "destination-rollback"
+    destination.mkdir()
+    sentinel = destination / "old.txt"
+    sentinel.write_text("old", encoding="utf-8")
+
+    real_replace = archive_module.os.replace
+    calls = 0
+
+    def fail_second_replace(source_path, destination_path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated install failure")
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(archive_module.os, "replace", fail_second_replace)
+    with pytest.raises(CoverVaultError, match="previous destination was preserved"):
+        extract_archive(archive_bytes, destination, overwrite=True)
+
+    assert sentinel.read_text(encoding="utf-8") == "old"
+    assert not (destination / "new.txt").exists()
+
+
+def test_v3_lsb_bootstrap_has_no_fixed_linear_magic(tmp_path: Path) -> None:
+    from cover_vault.stego import LEGACY_LSB_BOOTSTRAP_MAGIC
+
+    source = tmp_path / "source-signature"
+    cover = tmp_path / "cover-signature.png"
+    stego = tmp_path / "vault-signature.png"
+    make_source_folder(source)
+    make_png(cover)
+    hide_folder(source, cover, stego, "password", mode="image-lsb")
+
+    image = Image.open(stego).convert("RGBA")
+    pixel_bytes = image.tobytes()
+    bits = []
+    for pixel_base in range(0, len(pixel_bytes), 4):
+        for channel in range(3):
+            bits.append(pixel_bytes[pixel_base + channel] & 1)
+            if len(bits) == len(LEGACY_LSB_BOOTSTRAP_MAGIC) * 8:
+                break
+        if len(bits) == len(LEGACY_LSB_BOOTSTRAP_MAGIC) * 8:
+            break
+    linear_prefix = bytearray(len(LEGACY_LSB_BOOTSTRAP_MAGIC))
+    for index, bit in enumerate(bits):
+        linear_prefix[index // 8] |= bit << (7 - index % 8)
+    assert bytes(linear_prefix) != LEGACY_LSB_BOOTSTRAP_MAGIC
+
+
+def test_kdf_rejects_any_nonstandard_v2_cost_tuple() -> None:
+    import base64
+
+    from cover_vault.crypto import KDF_NAME, KdfParams
+
+    salt = base64.urlsafe_b64encode(b"0" * 16).decode("ascii")
+    for n, r, p in ((2**18, 8, 1), (2**17, 16, 1), (2**17, 8, 2)):
+        with pytest.raises(CoverVaultError, match="Unsupported scrypt parameters"):
+            KdfParams(KDF_NAME, salt, n, r, p).validate()

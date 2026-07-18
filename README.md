@@ -47,6 +47,8 @@ cover-vault hide ./my-codebase ./cover.png ./cover.stego.png \
   --exclude .venv
 ```
 
+Symbolic links, FIFOs, sockets, device nodes, and other special filesystem objects are rejected before encryption with the offending paths listed. Hard-linked regular files are archived as independent regular files so the vault is always restorable. Ownership, ACLs, extended attributes, sparse-file layout, and platform-specific metadata are not preserved; Cover Vault creates a portable file-tree snapshot rather than a byte-for-byte filesystem image.
+
 ## Supported carrier modes
 
 ### `wav-lsb`
@@ -127,19 +129,23 @@ New vaults use format version 2 with:
 - the complete serialized payload header authenticated as AES-GCM associated data,
 - a fresh random salt and nonce per payload,
 - a compressed `tar.gz` archive before encryption,
-- a small non-secret LSB bootstrap containing only bounded KDF parameters, followed by keyed pseudorandom payload placement.
+- a cover-derived, scattered, whitened, and authenticated LSB bootstrap containing the fixed version-2 KDF tuple and random salt, followed by password-keyed payload placement.
 
-The LSB bootstrap allows recovery software to perform the memory-hard KDF before it can locate and verify the hidden marker. This avoids exposing a cheap password-check path. Image and WAV vaults use only this version-2 placement design.
+The LSB bootstrap lets recovery software obtain the random salt before running scrypt, but new vaults no longer expose a fixed marker in the first carrier samples or channels. Its positions and whitening are derived from the exact original cover. The encrypted payload marker remains password-keyed and scattered. Placement version 2 from Cover Vault 2.0 remains readable; new image and WAV vaults are written with placement version 3.
 
-KDF metadata, nonce lengths, header sizes, archive member counts, extraction sizes, and path depth are validated before expensive or destructive operations. Output carrier files are written through a temporary sibling file and atomically replaced only after a successful write. Folder restoration is staged in a temporary directory, so a malformed archive does not erase an existing destination before validation completes.
+Version-2 KDF metadata must exactly match `N=2^17`, `r=8`, and `p=1`; attacker-selected higher-cost values are rejected before scrypt runs. KDF metadata, nonce lengths, header sizes, archive member counts, extraction sizes, and path depth are validated before expensive or destructive operations.
 
-Only version-2 payloads and placement metadata are accepted. Removing compatibility code reduces parser complexity and prevents accidental acceptance of the weaker 1.x format. Vaults made with 1.x must be restored using that release and then recreated.
+Output carrier files are written through a temporary sibling file. Existing output files are not replaced unless `--overwrite-output` (or the GUI checkbox) is selected, and the output can never be the exact original cover or a path inside the source folder. Folder restoration is staged in a temporary directory and installed with a rename-to-backup/replace/rollback sequence. Filesystem roots, the home directory, the current working directory or its parents, symbolic-link destinations, and destinations containing the vault or original cover are rejected.
+
+Only version-2 encrypted payloads are accepted. Vaults made with 1.x must be restored using that release and then recreated.
 
 The exact original WAV, image, or PDF cover is part of key derivation. A modified, re-encoded, optimized, or otherwise non-identical original cover will not unlock the payload.
 
 Passwords supplied with `--password` may be visible in shell history or process listings. For interactive use, omit the option and enter the password at the prompt.
 
 This project provides authenticated encryption, but its carrier techniques should not be assumed to make encrypted data undetectable. Use a long, unique password and retain tested backups.
+
+To keep the current one-shot archive and AES-GCM implementation from exhausting memory, creation rejects source trees above 512 MiB of regular-file data, local cover/stego files above 512 MiB, decoded WAV data above 512 MiB, and images above 50 million pixels. Remote covers remain limited to 256 MiB. Split larger folders or add exclusions.
 
 ## Installation for local development
 
@@ -166,7 +172,7 @@ Repository automation includes:
 - `.github/workflows/codeql.yml` for scheduled and pull-request CodeQL analysis,
 - `.github/workflows/dependency-review.yml` to reject newly introduced high-severity vulnerable dependencies in pull requests,
 - `.github/workflows/release.yml` for verified Windows, macOS, and Linux installer builds,
-- `.github/dependabot.yml` for weekly Python and GitHub Actions dependency updates.
+- `.github/dependabot.yml` for monthly Python and GitHub Actions dependency updates.
 
 ## Command-line usage
 
@@ -185,6 +191,14 @@ This prints the exact SHA-256 hash, detected carrier modes, and capacity or refe
 ```bash
 cover-vault hide ./my-codebase ./cover.png ./cover.stego.png
 ```
+
+Existing output files are preserved by default. Replace one only with explicit opt-in:
+
+```bash
+cover-vault hide ./my-codebase ./cover.png ./cover.stego.png --overwrite-output
+```
+
+The original cover path is always rejected as the output, even with this option.
 
 ### Reveal from an image
 
@@ -242,6 +256,7 @@ Cover Vault includes a cross-platform graphical interface with:
 - a capacity preview showing estimated encrypted size, carrier usage, and fit status,
 - configurable maximum usage ratio,
 - optional inclusion of Git history and comma-separated custom exclusions,
+- an explicit checkbox before an existing output vault may be replaced,
 - progress and status reporting while work runs outside the UI thread,
 - create-vault and restore-vault tabs.
 
@@ -262,7 +277,7 @@ The GUI deliberately keeps passwords in memory only for the duration of an opera
 
 ## Building desktop installers
 
-Installer builds are platform-specific because PyInstaller must build on the operating system it targets. The repository includes local build scripts and a GitHub Actions workflow at `.github/workflows/release.yml`.
+Installer builds are platform-specific because PyInstaller must build on the operating system it targets. The repository includes local build scripts and a GitHub Actions workflow at `.github/workflows/release.yml`. Installer builds use the exact top-level runtime and PyInstaller versions recorded in `requirements/release.txt`; update that file deliberately and validate all three platforms together.
 
 ### Windows installer
 
@@ -303,7 +318,7 @@ This creates an `amd64` `.deb` under `dist`. Installation adds Cover Vault to th
 
 ### Automated release builds
 
-Push a version tag such as `v2.0.0`, or run the workflow manually, to build all three artifacts on native GitHub-hosted runners. Artifacts are uploaded separately as:
+Push a version tag matching `pyproject.toml` (for example `v2.1.0`), or run the workflow manually, to build all three artifacts on native GitHub-hosted runners. Local and CI installer scripts reject a version override that disagrees with the package version. Artifacts are uploaded separately as:
 
 - `windows-installer`,
 - `macos-dmg`,

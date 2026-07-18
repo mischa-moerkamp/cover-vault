@@ -28,10 +28,6 @@ SCRYPT_R = 8
 SCRYPT_P = 1
 AES_GCM_TAG_BYTES = 16
 MAX_PAYLOAD_HEADER_BYTES = 64 * 1024
-MIN_SCRYPT_N = SCRYPT_N
-MAX_SCRYPT_N = 2**20
-MAX_SCRYPT_R = 32
-MAX_SCRYPT_P = 16
 MIN_SALT_BYTES = 16
 MAX_SALT_BYTES = 64
 
@@ -101,14 +97,11 @@ class KdfParams:
             raise CoverVaultError(f"Unsupported KDF: {self.name}")
         if self.length != KEY_BYTES:
             raise CoverVaultError("Unsupported derived-key length in vault metadata.")
-        if self.n < MIN_SCRYPT_N or self.n > MAX_SCRYPT_N:
-            raise CoverVaultError("scrypt work factor is outside the allowed range.")
-        if self.n & (self.n - 1):
-            raise CoverVaultError("scrypt work factor must be a power of two.")
-        if not 1 <= self.r <= MAX_SCRYPT_R:
-            raise CoverVaultError("scrypt block size is outside the allowed range.")
-        if not 1 <= self.p <= MAX_SCRYPT_P:
-            raise CoverVaultError("scrypt parallelism is outside the allowed range.")
+        if (self.n, self.r, self.p) != (SCRYPT_N, SCRYPT_R, SCRYPT_P):
+            raise CoverVaultError(
+                "Unsupported scrypt parameters for payload version 2. "
+                f"Expected N={SCRYPT_N}, r={SCRYPT_R}, p={SCRYPT_P}."
+            )
         salt = b64d(self.salt)
         if not MIN_SALT_BYTES <= len(salt) <= MAX_SALT_BYTES:
             raise CoverVaultError("KDF salt length is outside the allowed range.")

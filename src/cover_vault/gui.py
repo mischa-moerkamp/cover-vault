@@ -120,6 +120,7 @@ class CoverVaultApp(tk.Tk):
         self.hide_mode_var = tk.StringVar(value="auto")
         self.ratio_var = tk.DoubleVar(value=DEFAULT_MAX_USAGE_RATIO)
         self.git_var = tk.BooleanVar(value=False)
+        self.overwrite_output_var = tk.BooleanVar(value=False)
         self.custom_excludes_var = tk.StringVar()
         self.plan_var = tk.StringVar(
             value="Select a source folder and cover, then preview capacity."
@@ -163,19 +164,24 @@ class CoverVaultApp(tk.Tk):
         ttk.Checkbutton(
             f, text="Include Git commit history (.git)", variable=self.git_var
         ).grid(row=7, column=1, columnspan=2, sticky="w", pady=5)
-        ttk.Label(f, text="Extra excludes").grid(row=8, column=0, sticky="w", pady=5)
+        ttk.Checkbutton(
+            f,
+            text="Replace output file if it already exists",
+            variable=self.overwrite_output_var,
+        ).grid(row=8, column=1, columnspan=2, sticky="w", pady=5)
+        ttk.Label(f, text="Extra excludes").grid(row=9, column=0, sticky="w", pady=5)
         ttk.Entry(f, textvariable=self.custom_excludes_var).grid(
-            row=8, column=1, columnspan=2, sticky="ew", pady=5
+            row=9, column=1, columnspan=2, sticky="ew", pady=5
         )
         ttk.Label(
             f, text="Comma-separated names, for example node_modules, dist, .venv"
-        ).grid(row=9, column=1, columnspan=2, sticky="w")
-        ttk.Separator(f).grid(row=10, column=0, columnspan=3, sticky="ew", pady=12)
+        ).grid(row=10, column=1, columnspan=2, sticky="w")
+        ttk.Separator(f).grid(row=11, column=0, columnspan=3, sticky="ew", pady=12)
         ttk.Label(f, textvariable=self.plan_var, wraplength=680).grid(
-            row=11, column=0, columnspan=3, sticky="w", pady=(0, 10)
+            row=12, column=0, columnspan=3, sticky="w", pady=(0, 10)
         )
         actions = ttk.Frame(f)
-        actions.grid(row=12, column=0, columnspan=3, sticky="e")
+        actions.grid(row=13, column=0, columnspan=3, sticky="e")
         self.preview_button = ttk.Button(
             actions, text="Preview capacity", command=self._preview
         )
@@ -335,6 +341,7 @@ class CoverVaultApp(tk.Tk):
                     mode=self.hide_mode_var.get(),
                     excludes=excludes,
                     max_usage_ratio=self.ratio_var.get(),
+                    overwrite_output=self.overwrite_output_var.get(),
                     progress=self._progress_callback,
                 ),
             )

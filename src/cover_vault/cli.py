@@ -114,6 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_mode_arg(hide)
     _add_usage_arg(hide)
     hide.add_argument("--password", help="Password to use. Omit to enter securely.")
+    hide.add_argument(
+        "--overwrite-output",
+        action="store_true",
+        help="Replace an existing output vault. The original cover itself is never allowed as output.",
+    )
     _add_exclude_args(hide)
 
     reveal = subparsers.add_parser(
@@ -184,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
                 mode=args.mode,
                 excludes=_excludes_from_args(args),
                 max_usage_ratio=args.max_usage_ratio,
+                overwrite_output=args.overwrite_output,
             )
             print(
                 f"Hidden encrypted archive with {result['files_encrypted']} files in {result['output']} "

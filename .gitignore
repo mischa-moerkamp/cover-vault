@@ -8,6 +8,10 @@ build/
 .DS_Store
 *.vault
 *.stego.wav
-*.stego.mp3
+*.stego.png
+*.stego.bmp
+*.stego.tif
+*.stego.tiff
+*.stego.pdf
 .ruff_cache/
 *.pyc
